@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS _raw_sources (
 
 -- EDGE LAYER
 CREATE TABLE IF NOT EXISTS _edges_source (
-    chunk_id TEXT NOT NULL,
+    chunk_id TEXT NOT NULL PRIMARY KEY,
     source_id TEXT NOT NULL,
     source_type TEXT DEFAULT 'lobsters',
     position INTEGER
