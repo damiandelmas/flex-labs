@@ -31,6 +31,9 @@ git clone https://github.com/damiandelmas/flex-labs
 cd flex-labs
 ./scripts/install-module.sh devto      # copies modules/devto -> ~/.flex/modules/devto
 flex init --module devto --tags python,ai
+
+./scripts/install-module.sh aider      # agent modules resolve from modules/agents/
+flex init --module aider
 ```
 
 Skills install the same way to your agent's skills directory:
@@ -64,7 +67,7 @@ are documented per module — read them; they're honest.
 | `flex-archeology` | project history reconstruction from session evidence: file lineage, workstream recovery, artifact genealogy |
 | `flex-digest` | coworker-style standup of recent agent activity — inventory, file hotspots, delegations, open loops — four queries + synthesis |
 
-Both expect `claude_code` and/or `codex` cells (the flex coding-agent install).
+All three expect `claude_code` and/or `codex` cells (the flex coding-agent install).
 
 ## Reporting
 
