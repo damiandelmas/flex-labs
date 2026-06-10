@@ -1,4 +1,3 @@
-<!-- shared from the flex skill library — expects flex >= 0.31 with claude_code/codex cells -->
 ---
 name: flex:archeology
 description: Reconstruct project history from Flex evidence. Use when the user wants to recover workstreams, shifts, session assignments, artifact lineages, file history, or other retroactive knowledge surfaces from AI coding-agent sessions, git/file activity, context docs, and Flex cells.

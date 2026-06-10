@@ -21,7 +21,7 @@ the cold-start test matrix moves to the community tier in a flex release.
 
 ## Install
 
-Requires flex >= 0.31 (`curl -sSL https://getflex.dev/install.sh | bash`).
+Requires flex >= 0.40 (`curl -sSL https://getflex.dev/install.sh | bash`).
 
 flex discovers external modules in `~/.flex/modules/`. Installing a labs
 module is a copy:

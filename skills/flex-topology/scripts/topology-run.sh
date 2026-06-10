@@ -6,7 +6,7 @@
 #
 # Usage: topology-run.sh [DAYS]
 #
-# Requires: flex >= 0.31 with claude_code cell indexed.
+# Requires: flex >= 0.40 with claude_code cell indexed.
 # The flex MCP server must be reachable at localhost:${FLEX_MCP_PORT:-7134}
 # (set FLEX_MCP_PORT to override). All SQL query files are resolved relative
 # to this script's directory — no hardcoded absolute paths.
