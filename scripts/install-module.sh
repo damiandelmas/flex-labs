@@ -6,12 +6,17 @@ set -euo pipefail
 NAME="${1:-}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO_ROOT/modules/$NAME"
-DEST="${FLEX_HOME:-$HOME/.flex}/modules/$NAME"
+# Agent modules live under modules/agents/<name> but flex discovers external
+# modules one level deep, so the install destination is always flat.
+if [ -n "$NAME" ] && [ ! -d "$SRC" ] && [ -d "$REPO_ROOT/modules/agents/$NAME" ]; then
+    SRC="$REPO_ROOT/modules/agents/$NAME"
+fi
+DEST="${FLEX_HOME:-$HOME/.flex}/modules/$(basename "$NAME")"
 
 if [ -z "$NAME" ] || [ ! -d "$SRC" ]; then
     echo "usage: $0 <module-name>"
     echo "available:"
-    ls "$REPO_ROOT/modules/"
+    find "$REPO_ROOT/modules" -maxdepth 2 -name install.py | sed "s|$REPO_ROOT/modules/||;s|/install.py||"
     exit 1
 fi
 
