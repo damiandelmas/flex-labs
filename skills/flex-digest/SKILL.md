@@ -1,4 +1,3 @@
-<!-- shared from the flex skill library — expects flex >= 0.31 with claude_code/codex cells -->
 ---
 name: flex:digest
 description: Workstream-oriented standup of recent coding-agent activity. Runs focused SQL over a sessions cell (inventory, file hotspots, delegations, open loops), then synthesizes the combined payload into a coworker-style digest.
