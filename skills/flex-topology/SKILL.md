@@ -1,4 +1,3 @@
-<!-- shared from the flex skill library — expects flex >= 0.31 with claude_code/codex cells -->
 ---
 name: flex:topology
 description: Map the shape of the user's recent work across workstreams. Runs a pre-built topology query, then synthesizes fingerprints + hub openers into a 20-second-scannable standup with workstreams, spillover, and a pulse grid.
@@ -9,7 +8,7 @@ user-invocable: true
 
 # flex:topology
 
-!`scripts/topology-run.sh 14`
+!`~/.claude/skills/flex-topology/scripts/topology-run.sh 14`
 
 ---
 
