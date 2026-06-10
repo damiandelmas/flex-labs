@@ -38,6 +38,7 @@ Skills install the same way to your agent's skills directory:
 ```bash
 cp -r skills/flex-topology ~/.claude/skills/
 cp -r skills/flex-archeology ~/.claude/skills/
+cp -r skills/flex-digest ~/.claude/skills/
 ```
 
 ## What's here
@@ -61,6 +62,7 @@ are documented per module — read them; they're honest.
 |---|---|
 | `flex-topology` | standup-style map of your recent work — workstreams, hubs, what's hot, what went quiet — mined from your own coding-agent sessions |
 | `flex-archeology` | project history reconstruction from session evidence: file lineage, workstream recovery, artifact genealogy |
+| `flex-digest` | coworker-style standup of recent agent activity — inventory, file hotspots, delegations, open loops — four queries + synthesis |
 
 Both expect `claude_code` and/or `codex` cells (the flex coding-agent install).
 
