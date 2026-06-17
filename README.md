@@ -11,7 +11,7 @@ are the whole point. No support promise.
 
 ```
 CORE        ships in the flex wheel — actively developed
-COMMUNITY   ships in the wheel, beta tier — CI-tested, issue-driven fixes
+BETA   ships in the wheel — CI-tested, issue-driven fixes
 LABS        this repo — install over the wheel, experimental
 ```
 
