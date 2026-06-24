@@ -501,24 +501,25 @@ def run(args, console) -> None:
             ingest(db, abs_path, file_chunks, types="_types_instant")
 
     # ── call graph (Python nest/config): resolve call sites vs the cell-wide symbol map ──
-    name_to_ids: dict[str, list] = {}
-    for _nodes in by_file.values():
-        for n in _nodes:
-            st = n.get("section_title")
-            if st and not st.startswith("("):  # skip the (module) preamble leaf
-                name_to_ids.setdefault(st, []).append(n["id"])
-    call_rows = []
-    for _nodes in by_file.values():
-        for n in _nodes:
-            for nm in n.get("_calls", ()):  # only Python def nodes carry _calls
-                ids = name_to_ids.get(nm)
-                callee = ids[0] if ids and len(ids) == 1 else None  # unique name → resolved
-                call_rows.append((n["id"], callee, nm))
-    if call_rows:
-        db.executemany(
-            "INSERT OR IGNORE INTO _edges_call (caller_id, callee_id, callee_name) VALUES (?, ?, ?)",
-            call_rows,
-        )
+    if tree:  # only tree-mode nodes carry 'id'/'_calls'; flat chunks don't
+        name_to_ids: dict[str, list] = {}
+        for _nodes in by_file.values():
+            for n in _nodes:
+                st = n.get("section_title")
+                if st and not st.startswith("("):  # skip the (module) preamble leaf
+                    name_to_ids.setdefault(st, []).append(n["id"])
+        call_rows = []
+        for _nodes in by_file.values():
+            for n in _nodes:
+                for nm in n.get("_calls", ()):  # only Python def nodes carry _calls
+                    ids = name_to_ids.get(nm)
+                    callee = ids[0] if ids and len(ids) == 1 else None  # unique name → resolved
+                    call_rows.append((n["id"], callee, nm))
+        if call_rows:
+            db.executemany(
+                "INSERT OR IGNORE INTO _edges_call (caller_id, callee_id, callee_name) VALUES (?, ?, ?)",
+                call_rows,
+            )
 
     # ── import graph (Python): file → imported module/symbol (codegraph's import edges) ──
     if tree:
