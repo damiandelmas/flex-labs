@@ -58,7 +58,19 @@ CREATE TABLE IF NOT EXISTS _types_instant (
 );
 """
 
-_INSTANT_DDL = _FS_IDENTITY_DDL + _TYPES_DDL
+# Call graph (Python, nest/config): caller def -> callee def (callee_id NULL = external/unresolved).
+_CALL_DDL = """
+CREATE TABLE IF NOT EXISTS _edges_call (
+    caller_id   TEXT NOT NULL,
+    callee_id   TEXT,
+    callee_name TEXT NOT NULL,
+    PRIMARY KEY (caller_id, callee_name)
+);
+CREATE INDEX IF NOT EXISTS _edges_call_callee ON _edges_call(callee_id);
+CREATE INDEX IF NOT EXISTS _edges_call_name   ON _edges_call(callee_name);
+"""
+
+_INSTANT_DDL = _FS_IDENTITY_DDL + _TYPES_DDL + _CALL_DDL
 
 # Recursive query artifact (mirrors claude_code/stock/presets/delegation-tree.sql).
 # Dormant at depth-1 (no _edges_tree rows); the seat for multi-level containers.
@@ -68,6 +80,25 @@ _SUBTREE_PRESET_SQL = (
     "UNION ALL "
     "SELECT e.id, e.depth FROM _edges_tree e JOIN sub ON e.parent_id = sub.id) "
     "SELECT c.* FROM chunks c JOIN sub ON c.id = sub.id ORDER BY sub.depth, c.position"
+)
+
+# Call-graph presets — CodeGraph's callers/callees/impact as SQL (daemon-free).
+_CALLERS_SQL = (
+    "SELECT DISTINCT t.section_title AS caller, e.caller_id "
+    "FROM _edges_call e JOIN _types_instant t ON e.caller_id = t.chunk_id "
+    "WHERE e.callee_name = :symbol"
+)
+_CALLEES_SQL = (
+    "SELECT DISTINCT e.callee_name AS callee, e.callee_id "
+    "FROM _edges_call e JOIN _types_instant t ON e.caller_id = t.chunk_id "
+    "WHERE t.section_title = :symbol"
+)
+_IMPACT_SQL = (
+    "WITH RECURSIVE up(id) AS ("
+    "SELECT caller_id FROM _edges_call WHERE callee_name = :symbol "
+    "UNION "
+    "SELECT e.caller_id FROM _edges_call e JOIN up ON e.callee_id = up.id) "
+    "SELECT DISTINCT t.section_title AS affected FROM up JOIN _types_instant t ON up.id = t.chunk_id"
 )
 
 
@@ -188,6 +219,24 @@ def _build_code_tree(abs_path: str, text: str) -> list[dict]:
 
     nodes: list[dict] = []
 
+    def _own_call_names(node):
+        """Names called in node's OWN scope (pruning nested def subtrees — their
+        calls belong to them). func -> Name.id ('foo') or Attribute.attr ('obj.bar')."""
+        prune = {id(c) for c in _ast.iter_child_nodes(node) if isinstance(c, DEF)}
+        names = []
+
+        def _rec(n):
+            for child in _ast.iter_child_nodes(n):
+                if id(child) in prune:
+                    continue
+                if isinstance(child, _ast.Call):
+                    nm = getattr(child.func, "id", None) or getattr(child.func, "attr", None)
+                    if nm:
+                        names.append(nm)
+                _rec(child)
+        _rec(node)
+        return names
+
     def _emit(node, depth, parent_id):
         kids = [c for c in _ast.iter_child_nodes(node) if isinstance(c, DEF)]
         start = node.lineno - 1
@@ -196,7 +245,8 @@ def _build_code_tree(abs_path: str, text: str) -> list[dict]:
             "\n".join(lines[node.lineno - 1:(node.end_lineno or node.lineno)])
         cid = _make_chunk_id(abs_path, len(nodes), own)
         nodes.append({"id": cid, "content": own, "section_title": node.name,
-                      "position": len(nodes), "depth": depth, "container_id": parent_id})
+                      "position": len(nodes), "depth": depth, "container_id": parent_id,
+                      "_calls": _own_call_names(node)})
         for c in kids:
             _emit(c, depth + 1, cid)
 
@@ -425,6 +475,26 @@ def run(args, console) -> None:
                 ch["content_hash"] = hashlib.sha256((ch.get("content") or "").encode("utf-8")).hexdigest()
             ingest(db, abs_path, file_chunks, types="_types_instant")
 
+    # ── call graph (Python nest/config): resolve call sites vs the cell-wide symbol map ──
+    name_to_ids: dict[str, list] = {}
+    for _nodes in by_file.values():
+        for n in _nodes:
+            st = n.get("section_title")
+            if st and not st.startswith("("):  # skip the (module) preamble leaf
+                name_to_ids.setdefault(st, []).append(n["id"])
+    call_rows = []
+    for _nodes in by_file.values():
+        for n in _nodes:
+            for nm in n.get("_calls", ()):  # only Python def nodes carry _calls
+                ids = name_to_ids.get(nm)
+                callee = ids[0] if ids and len(ids) == 1 else None  # unique name → resolved
+                call_rows.append((n["id"], callee, nm))
+    if call_rows:
+        db.executemany(
+            "INSERT OR IGNORE INTO _edges_call (caller_id, callee_id, callee_name) VALUES (?, ?, ?)",
+            call_rows,
+        )
+
     # ── SOMA file identity (machine-global spine; must never fail a compile) ──
     soma_status = "skipped (--no-soma)"
     if not getattr(args, "no_soma", False):
@@ -442,13 +512,17 @@ def run(args, console) -> None:
             soma_status = f"failed, skipped ({type(e).__name__})"
 
     # ── v5: ship the recursive subtree preset (the query artifact; dormant at depth-1) ──
-    db.execute(
-        "INSERT OR REPLACE INTO _presets (name, description, params, sql) VALUES (?, ?, ?, ?)",
-        ("subtree",
-         "Recursive descendants of a container node (over _edges_tree).",
-         "root",
-         _SUBTREE_PRESET_SQL),
-    )
+    for _name, _desc, _sql in (
+        ("subtree", "Recursive descendants of a container node (over _edges_tree).", _SUBTREE_PRESET_SQL),
+        ("callers", "Who calls a symbol (call graph). @callers symbol=NAME", _CALLERS_SQL),
+        ("callees", "What a symbol calls (call graph). @callees symbol=NAME", _CALLEES_SQL),
+        ("impact", "Multi-hop callers — what's affected if a symbol changes. @impact symbol=NAME", _IMPACT_SQL),
+    ):
+        _params = "root" if _name == "subtree" else "symbol"
+        db.execute(
+            "INSERT OR REPLACE INTO _presets (name, description, params, sql) VALUES (?, ?, ?, ?)",
+            (_name, _desc, _params, _sql),
+        )
 
     # ── recipe stamp: the cell carries its own derivation ──
     set_meta(db, "selections", json.dumps(selections))
