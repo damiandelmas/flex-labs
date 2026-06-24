@@ -191,6 +191,8 @@ _WALK_EXCLUDE = {
     "site-packages", ".git", ".mypy_cache", ".pytest_cache", ".tox", ".ruff_cache",
     ".idea", ".vscode", "target", ".next", "coverage", "htmlcov", "_corpus",
 }
+# Dot-dirs that are CONTENT, not junk — the runway grammar. Kept past the dot-prune.
+_WALK_KEEP = {".context", ".work", ".teams"}
 
 
 def _walk_files(folder):
@@ -204,7 +206,8 @@ def _walk_files(folder):
     for dirpath, dirnames, filenames in os.walk(folder):
         dirnames[:] = sorted(
             d for d in dirnames
-            if d not in _WALK_EXCLUDE and not d.startswith(".") and not d.endswith(".egg-info")
+            if d not in _WALK_EXCLUDE and not d.endswith(".egg-info")
+            and (not d.startswith(".") or d in _WALK_KEEP)
         )
         for fn in sorted(filenames):
             if fn.startswith("."):
