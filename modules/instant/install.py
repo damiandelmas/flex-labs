@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS _edges_call (
 );
 CREATE INDEX IF NOT EXISTS _edges_call_callee ON _edges_call(callee_id);
 CREATE INDEX IF NOT EXISTS _edges_call_name   ON _edges_call(callee_name);
+
+CREATE TABLE IF NOT EXISTS _edges_import (
+    source_id TEXT NOT NULL,   -- the importing file
+    module    TEXT NOT NULL,   -- the imported module ('os', 'flex.core', '.state')
+    name      TEXT,            -- the imported symbol (NULL for plain `import module`)
+    PRIMARY KEY (source_id, module, name)
+);
+CREATE INDEX IF NOT EXISTS _edges_import_module ON _edges_import(module);
 """
 
 _INSTANT_DDL = _FS_IDENTITY_DDL + _TYPES_DDL + _CALL_DDL
@@ -177,23 +185,40 @@ def _load_chunking_mode(name: str) -> str:
         ro.close()
 
 
+# Noise dirs pruned during the walk — the .gitignore'd bulk (venv/build/caches/deps).
+_WALK_EXCLUDE = {
+    "__pycache__", "venv", ".venv", "env", "build", "dist", "node_modules",
+    "site-packages", ".git", ".mypy_cache", ".pytest_cache", ".tox", ".ruff_cache",
+    ".idea", ".vscode", "target", ".next", "coverage", "htmlcov", "_corpus",
+}
+
+
 def _walk_files(folder):
-    """Yield (Path, text) for indexable files — same selection as _walk_and_chunk."""
+    """Yield (Path, text) for indexable files, pruning noise dirs (venv/build/caches/
+    deps) and dot-dirs — the .gitignore'd bulk that should never be indexed. Uses
+    os.walk so excluded trees are never descended into (fast on junk-heavy roots)."""
+    import os
     from pathlib import Path  # noqa: F811
     exts = (".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx",
             ".rs", ".go", ".yaml", ".yml", ".json", ".csv")
-    for f in sorted(folder.rglob("*")):
-        if not f.is_file() or f.name.startswith("."):
-            continue
-        if f.suffix not in exts:
-            continue
-        try:
-            text = f.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        if not text.strip():
-            continue
-        yield f, text
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in _WALK_EXCLUDE and not d.startswith(".") and not d.endswith(".egg-info")
+        )
+        for fn in sorted(filenames):
+            if fn.startswith("."):
+                continue
+            p = Path(dirpath) / fn
+            if p.suffix not in exts:
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            if not text.strip():
+                continue
+            yield p, text
 
 
 def _build_code_tree(abs_path: str, text: str) -> list[dict]:
@@ -220,8 +245,10 @@ def _build_code_tree(abs_path: str, text: str) -> list[dict]:
     nodes: list[dict] = []
 
     def _own_call_names(node):
-        """Names called in node's OWN scope (pruning nested def subtrees — their
-        calls belong to them). func -> Name.id ('foo') or Attribute.attr ('obj.bar')."""
+        """Bare-function calls in node's OWN scope (pruning nested def subtrees).
+        Only `Name(...)` calls (`foo()`) — high-confidence internal-function edges.
+        `x.method()` (Attribute) is dropped: name-only resolution can't tell
+        `wal.append()` from `list.append()`, so method calls are container/db noise."""
         prune = {id(c) for c in _ast.iter_child_nodes(node) if isinstance(c, DEF)}
         names = []
 
@@ -229,10 +256,8 @@ def _build_code_tree(abs_path: str, text: str) -> list[dict]:
             for child in _ast.iter_child_nodes(n):
                 if id(child) in prune:
                     continue
-                if isinstance(child, _ast.Call):
-                    nm = getattr(child.func, "id", None) or getattr(child.func, "attr", None)
-                    if nm:
-                        names.append(nm)
+                if isinstance(child, _ast.Call) and isinstance(child.func, _ast.Name):
+                    names.append(child.func.id)
                 _rec(child)
         _rec(node)
         return names
@@ -494,6 +519,31 @@ def run(args, console) -> None:
             "INSERT OR IGNORE INTO _edges_call (caller_id, callee_id, callee_name) VALUES (?, ?, ?)",
             call_rows,
         )
+
+    # ── import graph (Python): file → imported module/symbol (codegraph's import edges) ──
+    if tree:
+        import ast as _ast2
+        import_rows = []
+        for abs_path in by_file:
+            if not abs_path.endswith(".py"):
+                continue
+            try:
+                _t = _ast2.parse(Path(abs_path).read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+            for nd in _ast2.walk(_t):
+                if isinstance(nd, _ast2.Import):
+                    for a in nd.names:
+                        import_rows.append((abs_path, a.name, None))
+                elif isinstance(nd, _ast2.ImportFrom):
+                    mod = ("." * (nd.level or 0)) + (nd.module or "")
+                    for a in nd.names:
+                        import_rows.append((abs_path, mod, a.name))
+        if import_rows:
+            db.executemany(
+                "INSERT OR IGNORE INTO _edges_import (source_id, module, name) VALUES (?, ?, ?)",
+                import_rows,
+            )
 
     # ── SOMA file identity (machine-global spine; must never fail a compile) ──
     soma_status = "skipped (--no-soma)"
