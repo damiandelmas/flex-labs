@@ -165,6 +165,51 @@ def _walk_files(folder):
         yield f, text
 
 
+def _build_code_tree(abs_path: str, text: str) -> list[dict]:
+    """Python AST tree: module ⊃ class ⊃ method/function, span-based.
+
+    A node's content is its OWN region (signature + body up to its first nested def);
+    nested defs are recursed as children — so a class node does not duplicate its
+    methods' text (the code analogue of a heading-section excluding its sub-sections).
+    A '(module)' leaf captures the module-level preamble (docstring/imports) before the
+    first def. Falls back to flat chunking on a SyntaxError or a def-less file."""
+    import ast as _ast
+    from flex.sdk import _make_chunk_id
+
+    try:
+        tree = _ast.parse(text)
+    except SyntaxError:
+        return _build_nodes(abs_path, text, "flat")
+    lines = text.splitlines()
+    DEF = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)
+    top_defs = [n for n in _ast.iter_child_nodes(tree) if isinstance(n, DEF)]
+    if not top_defs:
+        return _build_nodes(abs_path, text, "flat")
+
+    nodes: list[dict] = []
+
+    def _emit(node, depth, parent_id):
+        kids = [c for c in _ast.iter_child_nodes(node) if isinstance(c, DEF)]
+        start = node.lineno - 1
+        end = (kids[0].lineno - 1) if kids else (node.end_lineno or node.lineno)
+        own = "\n".join(lines[start:end]).rstrip() or \
+            "\n".join(lines[node.lineno - 1:(node.end_lineno or node.lineno)])
+        cid = _make_chunk_id(abs_path, len(nodes), own)
+        nodes.append({"id": cid, "content": own, "section_title": node.name,
+                      "position": len(nodes), "depth": depth, "container_id": parent_id})
+        for c in kids:
+            _emit(c, depth + 1, cid)
+
+    preamble = "\n".join(lines[:top_defs[0].lineno - 1]).strip()
+    if preamble:
+        nodes.append({"id": _make_chunk_id(abs_path, len(nodes), preamble),
+                      "content": preamble, "section_title": "(module)",
+                      "position": len(nodes), "depth": 1, "container_id": abs_path})
+    for node in top_defs:
+        _emit(node, 1, abs_path)
+    return nodes
+
+
 def _build_tree(abs_path: str, text: str) -> list[dict]:
     """Build the node tree for one file.
 
@@ -179,6 +224,8 @@ def _build_tree(abs_path: str, text: str) -> list[dict]:
     from flex.sdk import _make_chunk_id
 
     ext = abs_path.rsplit(".", 1)[-1].lower() if "." in abs_path else ""
+    if ext == "py":
+        return _build_code_tree(abs_path, text)
     nodes: list[dict] = []
 
     if ext == "md":
