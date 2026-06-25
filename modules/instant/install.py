@@ -133,6 +133,8 @@ def register_args(parser) -> None:
              help="Multi-level: build the heading tree (container > container > leaf) + _edges_tree")
     _add_arg(parser, "--config", action="store_true",
              help="Cascade: each file split by the nearest .flexchunk.json 'split' rule (per-folder rules)")
+    _add_arg(parser, "--code", action="store_true",
+             help="Code cell: index only code extensions (.py/.ts/.js/.go/.rs/...), skip docs/data/config")
 
 
 def _slug(text: str) -> str:
@@ -185,6 +187,28 @@ def _load_chunking_mode(name: str) -> str:
         ro.close()
 
 
+def _load_code_flag(name: str) -> bool:
+    """Read the stored code-extension flag from the recipe — so a bare --regen of a
+    code cell stays code-only (the cell carries its own derivation)."""
+    from flex.core import get_meta, open_cell_readonly
+    from flex.registry import resolve_cell
+
+    cell_path = resolve_cell(name)
+    if cell_path is None:
+        return False
+    ro = open_cell_readonly(str(cell_path))
+    try:
+        raw = get_meta(ro, "chunking")
+        if raw:
+            try:
+                return bool(json.loads(raw).get("code", False))
+            except (ValueError, AttributeError):
+                return False
+        return False
+    finally:
+        ro.close()
+
+
 # Noise dirs pruned during the walk — the .gitignore'd bulk (venv/build/caches/deps).
 _WALK_EXCLUDE = {
     "__pycache__", "venv", ".venv", "env", "build", "dist", "node_modules",
@@ -222,14 +246,20 @@ def _git_listed(folder):
         return None
 
 
-def _walk_files(folder):
+_CODE_EXTS = (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".rb",
+              ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".swift", ".kt", ".scala")
+_DOC_EXTS = (".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx",
+             ".rs", ".go", ".yaml", ".yml", ".json", ".csv")
+
+
+def _walk_files(folder, code=False):
     """Yield (Path, text) for indexable files. PRIMARY: git — only non-ignored files
     (respects .gitignore, so no build/data/vendored/log junk). FALLBACK (non-git
-    dirs): os.walk pruning the noise-dir denylist + runway-grammar whitelist."""
+    dirs): os.walk pruning the noise-dir denylist + runway-grammar whitelist.
+    code=True → index only code extensions (skip .md/.txt/.json/.yaml docs+data)."""
     import os
     from pathlib import Path  # noqa: F811
-    exts = (".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx",
-            ".rs", ".go", ".yaml", ".yml", ".json", ".csv")
+    exts = _CODE_EXTS if code else _DOC_EXTS
     listed = _git_listed(folder)
     if listed is not None:
         candidates = listed
@@ -424,6 +454,7 @@ def run(args, console) -> None:
 
     nest = getattr(args, "nest", False)
     config_mode = getattr(args, "config", False)
+    code = getattr(args, "code", False)
 
     regen = getattr(args, "regen", None)
     name = (getattr(args, "name", None)
@@ -437,6 +468,8 @@ def run(args, console) -> None:
         stored = _load_chunking_mode(name)
         nest = stored == "nest"
         config_mode = stored == "config"
+    if regen is not None and not code:
+        code = _load_code_flag(name)
     tree = nest or config_mode  # both modes write _types_instant + the _edges_tree tree
     if regen is not None and not selections and not getattr(args, "path", None):
         _error(console, f"cell '{name}' has no stored selections — add one with --path")
@@ -473,7 +506,7 @@ def run(args, console) -> None:
         cfg_cache: dict = {}
         for root_str in selections:
             root = Path(root_str)
-            for f, text in _walk_files(root):
+            for f, text in _walk_files(root, code=code):
                 abs_path = str(f.resolve())
                 if abs_path in by_file:
                     skipped_dupes += 1
@@ -483,7 +516,7 @@ def run(args, console) -> None:
     elif nest:
         for root_str in selections:
             root = Path(root_str)
-            for f, text in _walk_files(root):
+            for f, text in _walk_files(root, code=code):
                 abs_path = str(f.resolve())
                 if abs_path in by_file:
                     skipped_dupes += 1
@@ -614,7 +647,7 @@ def run(args, console) -> None:
     # ── recipe stamp: the cell carries its own derivation ──
     set_meta(db, "selections", json.dumps(selections))
     _split_mode = "config" if config_mode else ("nest" if nest else "flat")
-    set_meta(db, "chunking", json.dumps({"split_mode": _split_mode}))
+    set_meta(db, "chunking", json.dumps({"split_mode": _split_mode, "code": bool(code)}))
     set_meta(db, "resolver", "node_tree@v1")
     set_meta(db, "profile", "instant")
     set_meta(db, "compiled_at", datetime.now(timezone.utc).isoformat())
