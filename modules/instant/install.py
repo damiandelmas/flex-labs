@@ -195,33 +195,66 @@ _WALK_EXCLUDE = {
 _WALK_KEEP = {".context", ".work", ".teams"}
 
 
+def _git_listed(folder):
+    """Files git would NOT ignore under `folder` — tracked + untracked-but-not-ignored
+    (`git ls-files --cached --others --exclude-standard`). Returns absolute Paths, or
+    None if `folder` is not in a git repo. This is the right filter for a code cell:
+    it honors .gitignore, so build artifacts, data dumps, vendored deps, and logs are
+    excluded by the repo's own declaration — no hand-rolled denylist needed."""
+    import subprocess
+    from pathlib import Path  # noqa: F811
+    folder = Path(folder).resolve()
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(folder), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=15)
+        if top.returncode != 0:
+            return None
+        toplevel = Path(top.stdout.strip())
+        r = subprocess.run(
+            ["git", "-C", str(folder), "ls-files", "--cached", "--others",
+             "--exclude-standard", "--full-name", "-z"],
+            capture_output=True, timeout=120)
+        if r.returncode != 0:
+            return None
+        return [toplevel / x for x in r.stdout.decode("utf-8", "ignore").split("\0") if x]
+    except Exception:
+        return None
+
+
 def _walk_files(folder):
-    """Yield (Path, text) for indexable files, pruning noise dirs (venv/build/caches/
-    deps) and dot-dirs — the .gitignore'd bulk that should never be indexed. Uses
-    os.walk so excluded trees are never descended into (fast on junk-heavy roots)."""
+    """Yield (Path, text) for indexable files. PRIMARY: git — only non-ignored files
+    (respects .gitignore, so no build/data/vendored/log junk). FALLBACK (non-git
+    dirs): os.walk pruning the noise-dir denylist + runway-grammar whitelist."""
     import os
     from pathlib import Path  # noqa: F811
     exts = (".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx",
             ".rs", ".go", ".yaml", ".yml", ".json", ".csv")
-    for dirpath, dirnames, filenames in os.walk(folder):
-        dirnames[:] = sorted(
-            d for d in dirnames
-            if d not in _WALK_EXCLUDE and not d.endswith(".egg-info")
-            and (not d.startswith(".") or d in _WALK_KEEP)
-        )
-        for fn in sorted(filenames):
-            if fn.startswith("."):
-                continue
-            p = Path(dirpath) / fn
-            if p.suffix not in exts:
-                continue
-            try:
-                text = p.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
-            if not text.strip():
-                continue
-            yield p, text
+    listed = _git_listed(folder)
+    if listed is not None:
+        candidates = listed
+    else:
+        candidates = []
+        for dirpath, dirnames, filenames in os.walk(folder):
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if d not in _WALK_EXCLUDE and not d.endswith(".egg-info")
+                and (not d.startswith(".") or d in _WALK_KEEP)
+            )
+            for fn in sorted(filenames):
+                candidates.append(Path(dirpath) / fn)
+    for p in sorted(set(candidates)):
+        if p.name.startswith("."):
+            continue
+        if p.suffix not in exts or not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        if not text.strip():
+            continue
+        yield p, text
 
 
 def _build_code_tree(abs_path: str, text: str) -> list[dict]:
