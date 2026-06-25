@@ -213,7 +213,8 @@ def _load_code_flag(name: str) -> bool:
 _WALK_EXCLUDE = {
     "__pycache__", "venv", ".venv", "env", "build", "dist", "node_modules",
     "site-packages", ".git", ".mypy_cache", ".pytest_cache", ".tox", ".ruff_cache",
-    ".idea", ".vscode", "target", ".next", "coverage", "htmlcov", "_corpus",
+    ".idea", ".vscode", "target", ".next", "out", ".wrangler", ".turbo", ".cache",
+    "coverage", "htmlcov", "_corpus",
 }
 # Dot-dirs that are CONTENT, not junk — the runway grammar. Kept past the dot-prune.
 _WALK_KEEP = {".context", ".work", ".teams"}
