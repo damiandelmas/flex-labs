@@ -352,6 +352,122 @@ def _build_code_tree(abs_path: str, text: str) -> list[dict]:
     return nodes
 
 
+_TS_EXTS = {"ts", "tsx", "js", "jsx", "mjs", "cjs"}
+
+
+def _ts_language(ext):
+    """tree-sitter Language for a JS/TS-family extension (None if grammars unavailable)."""
+    try:
+        from tree_sitter import Language
+        if ext == "ts":
+            import tree_sitter_typescript as _t
+            return Language(_t.language_typescript())
+        if ext == "tsx":
+            import tree_sitter_typescript as _t
+            return Language(_t.language_tsx())
+        import tree_sitter_javascript as _j  # js/jsx/mjs/cjs (the JS grammar handles JSX)
+        return Language(_j.language())
+    except Exception:
+        return None
+
+
+def _build_code_tree_ts(abs_path: str, text: str, ext: str) -> list[dict]:
+    """tree-sitter tree for JS/TS: module ⊃ class ⊃ method/fn ⊃ nested fn, span-based.
+
+    Mirrors the Python `_build_code_tree`. A node's content is its OWN region (up to its
+    first nested def); nested defs recurse as children. Calls are collected per def's own
+    scope: bare `foo()` AND `this.m()` / `super.m()` — the latter is high-confidence in
+    OO/TS, where name-only resolution maps the method to the enclosing class (this is
+    where TS's call graph actually lives). Other member calls (`obj.m()`) are dropped —
+    the same precision rule as Python's Attribute drop. Falls back to flat on a parse
+    failure or a def-less file."""
+    from flex.sdk import _make_chunk_id
+    lang = _ts_language(ext)
+    if lang is None:
+        return _build_nodes(abs_path, text, "flat")
+    try:
+        from tree_sitter import Parser
+        src = text.encode("utf-8")
+        root = Parser(lang).parse(src).root_node
+    except Exception:
+        return _build_nodes(abs_path, text, "flat")
+
+    DECL = {"function_declaration", "generator_function_declaration", "method_definition",
+            "class_declaration", "abstract_class_declaration"}
+
+    def _name(n):
+        if n.type in DECL:
+            f = n.child_by_field_name("name")
+            return f.text.decode("utf-8", "ignore") if f else None
+        if n.type == "variable_declarator":           # const foo = () => {} / function(){}
+            v = n.child_by_field_name("value")
+            if v is not None and v.type in ("arrow_function", "function_expression"):
+                f = n.child_by_field_name("name")
+                return f.text.decode("utf-8", "ignore") if f else None
+        return None
+
+    def _child_defs(n):
+        """Nearest nested defs under n (descend through non-def nodes, stop at each def)."""
+        out = []
+
+        def rec(m):
+            for c in m.children:
+                if _name(c) is not None:
+                    out.append(c)
+                else:
+                    rec(c)
+        rec(n)
+        return out
+
+    def _own_calls(n, kids):
+        """bare foo() + this.m()/super.m() in n's own scope (excluding nested-def subtrees)."""
+        prune = {id(c) for c in kids}
+        names = []
+
+        def rec(m):
+            for c in m.children:
+                if id(c) in prune:
+                    continue
+                if c.type == "call_expression":
+                    f = c.child_by_field_name("function")
+                    if f is not None and f.type == "identifier":
+                        names.append(f.text.decode("utf-8", "ignore"))
+                    elif f is not None and f.type == "member_expression":
+                        o = f.child_by_field_name("object")
+                        p = f.child_by_field_name("property")
+                        if o is not None and p is not None and o.type in ("this", "super"):
+                            names.append(p.text.decode("utf-8", "ignore"))
+                rec(c)
+        rec(n)
+        return names
+
+    nodes: list[dict] = []
+
+    def _emit(n, depth, parent_id):
+        kids = _child_defs(n)
+        own_end = kids[0].start_byte if kids else n.end_byte
+        own = src[n.start_byte:own_end].decode("utf-8", "ignore").rstrip() or \
+            src[n.start_byte:n.end_byte].decode("utf-8", "ignore")
+        cid = _make_chunk_id(abs_path, len(nodes), own)
+        nodes.append({"id": cid, "content": own, "section_title": _name(n) or "",
+                      "position": len(nodes), "depth": depth, "container_id": parent_id,
+                      "_calls": _own_calls(n, kids)})
+        for c in kids:
+            _emit(c, depth + 1, cid)
+
+    top = _child_defs(root)
+    if not top:
+        return _build_nodes(abs_path, text, "flat")
+    preamble = src[:top[0].start_byte].decode("utf-8", "ignore").strip()
+    if preamble:
+        nodes.append({"id": _make_chunk_id(abs_path, len(nodes), preamble),
+                      "content": preamble, "section_title": "(module)",
+                      "position": len(nodes), "depth": 1, "container_id": abs_path})
+    for n in top:
+        _emit(n, 1, abs_path)
+    return nodes
+
+
 def _build_tree(abs_path: str, text: str) -> list[dict]:
     """Build the node tree for one file.
 
@@ -359,7 +475,8 @@ def _build_tree(abs_path: str, text: str) -> list[dict]:
     stack over split_sections(return_depth=True). Every heading-section is a content
     node (its body) AND a container (parent of deeper sections) — "container and
     chunk are the same node at different levels." container_id = the parent node's id
-    (or the file path for top-level). Non-markdown → flat chunk_file_body under root.
+    (or the file path for top-level). Python → ast tree; JS/TS → tree-sitter tree;
+    other non-markdown → flat chunk_file_body under root.
     """
     from flex.compile.chunkers import chunk_file_body
     from flex.compile.markdown import normalize_headers, split_sections
@@ -368,6 +485,8 @@ def _build_tree(abs_path: str, text: str) -> list[dict]:
     ext = abs_path.rsplit(".", 1)[-1].lower() if "." in abs_path else ""
     if ext == "py":
         return _build_code_tree(abs_path, text)
+    if ext in _TS_EXTS:
+        return _build_code_tree_ts(abs_path, text, ext)
     nodes: list[dict] = []
 
     if ext == "md":
@@ -610,6 +729,30 @@ def run(args, console) -> None:
                     mod = ("." * (nd.level or 0)) + (nd.module or "")
                     for a in nd.names:
                         import_rows.append((abs_path, mod, a.name))
+        for abs_path in by_file:                       # JS/TS imports (tree-sitter)
+            ext = abs_path.rsplit(".", 1)[-1].lower() if "." in abs_path else ""
+            if ext not in _TS_EXTS:
+                continue
+            lang = _ts_language(ext)
+            if lang is None:
+                continue
+            try:
+                from tree_sitter import Parser
+                _src = Path(abs_path).read_text(encoding="utf-8", errors="ignore").encode("utf-8")
+                _root = Parser(lang).parse(_src).root_node
+            except Exception:
+                continue
+
+            def _imp(m):
+                for c in m.children:
+                    if c.type == "import_statement":
+                        srcn = c.child_by_field_name("source")
+                        if srcn is not None:
+                            mod = srcn.text.decode("utf-8", "ignore").strip("\"'`")
+                            if mod:
+                                import_rows.append((abs_path, mod, None))
+                    _imp(c)
+            _imp(_root)
         if import_rows:
             db.executemany(
                 "INSERT OR IGNORE INTO _edges_import (source_id, module, name) VALUES (?, ?, ?)",
