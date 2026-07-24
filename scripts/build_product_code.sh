@@ -41,19 +41,76 @@ PY
 )
 
 declare -A SEEN
+declare -A GROUP_COUNTS
+for line in "${LINES[@]}"; do
+  group="${line%%|*}"
+  GROUP_COUNTS[$group]=$(( ${GROUP_COUNTS[$group]:-0} + 1 ))
+done
+
+FAILED=0
 for line in "${LINES[@]}"; do
   group="${line%%|*}"; repo="${line#*|}"
   [ -n "$ONLY_GROUP" ] && [ "$group" != "$ONLY_GROUP" ] && continue
   cell="${PROD}-${group}-code"
   if [ -z "${SEEN[$cell]:-}" ]; then
-    rm -f "$HOME/.flex/cells/labs/${cell}.db"*                       # clean union
+    existing_path="$(sqlite3 "$REG" \
+      "SELECT path FROM cells WHERE name='${cell}';" 2>/dev/null)"
+    if [[ "$existing_path" == "$HOME/.flex/cells/"*.db ]]; then
+      rm -f "$existing_path" "${existing_path}-wal" "${existing_path}-shm"
+    fi
+    rm -f "$HOME/.flex/cells/labs/${cell}.db" \
+          "$HOME/.flex/cells/labs/${cell}.db-wal" \
+          "$HOME/.flex/cells/labs/${cell}.db-shm"                    # clean union
     sqlite3 "$REG" "DELETE FROM cells WHERE name='${cell}'" 2>/dev/null
     SEEN[$cell]=1
     echo ">> $cell"
   fi
   [ -d "$repo" ] || { echo "   ! missing repo: $repo" >&2; continue; }
   echo "   + $repo"
-  "$FLEX" init --module instant --nest --code --path "$repo" --name "$cell" >/dev/null 2>&1 \
-    || echo "   ! build failed: $repo" >&2
+
+  LOG="$(mktemp)"
+  if [ "${GROUP_COUNTS[$group]}" -eq 1 ]; then
+    CMD=("$FLEX" init --module codegraph --path "$repo" --name "$cell")
+    EXCLUDES="$RW/$group/.context/about/code-excludes.json"
+    if [ -f "$EXCLUDES" ]; then
+      while IFS= read -r excluded; do
+        CMD+=(--exclude "$excluded")
+      done < <(python3 - "$EXCLUDES" <<'PY'
+import json, sys
+for item in json.load(open(sys.argv[1])):
+    print(item)
+PY
+)
+    fi
+  else
+    # `instant` is now a compatibility alias for the single-root filesystem
+    # compiler. --regen deliberately selects the legacy multi-selection path.
+    CMD=("$FLEX" init --module instant --regen "$cell" --nest --code
+         --path "$repo" --name "$cell")
+  fi
+  if ! "${CMD[@]}" >"$LOG" 2>&1; then
+    echo "   ! build failed: $repo" >&2
+    sed -n '1,160p' "$LOG" >&2
+    FAILED=1
+  fi
+  rm -f "$LOG"
 done
+
+for cell in "${!SEEN[@]}"; do
+  group="${cell#${PROD}-}"; group="${group%-code}"
+  expected="${GROUP_COUNTS[$group]}"
+  cell_path="$(sqlite3 "$REG" \
+    "SELECT path FROM cells WHERE name='${cell}';" 2>/dev/null)"
+  actual="$(sqlite3 "$cell_path" \
+    "SELECT json_array_length(value) FROM _meta WHERE key='selections';" 2>/dev/null)"
+  if [ "$actual" != "$expected" ]; then
+    echo "   ! selection parity failed: $cell expected=$expected actual=${actual:-missing}" >&2
+    FAILED=1
+  fi
+done
+
+if [ "$FAILED" -ne 0 ]; then
+  echo "failed: $PROD${ONLY_GROUP:+/$ONLY_GROUP}" >&2
+  exit 1
+fi
 echo "done: $PROD${ONLY_GROUP:+/$ONLY_GROUP}"
