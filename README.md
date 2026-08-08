@@ -53,7 +53,7 @@ cp -r skills/flex-digest ~/.claude/skills/
 | `devto` | Dev.to articles + comments by tag/author (no auth) | `flex init --module devto --tags python,ai` |
 | `lobsters` | lobste.rs stories + comments by tag (no auth) | `flex init --module lobsters --lobsters-tags programming,ai` |
 | `agents/aider` | Aider chat histories — programmable memory for Aider | `flex init --module aider` |
-| `agents/opencode` | OpenCode SQLite sessions — programmable memory for OpenCode | `flex init --module opencode` |
+| `agents/opencode` | OpenCode stable/v2 canonical SQLite sessions — programmable memory for OpenCode | `flex init --module opencode` |
 
 Every module cell self-documents: run `@orient` on it and the module's own
 instructions, views, and presets come back as part of the answer. Known gaps
