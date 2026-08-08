@@ -9,14 +9,14 @@ from flex.modules.claude_code.coding_agent_install import (
 from flex.modules.opencode.compile.worker import DEFAULT_OPENCODE_DB
 
 
-MODULE_SUMMARY = "index OpenCode SQLite sessions — programmable memory for OpenCode"
+MODULE_SUMMARY = "index OpenCode stable/v2 SQLite sessions — programmable memory for OpenCode"
 
 MODULE = {
     "cell_type": "opencode",
     "maturity": "preview",
     "license_intent": "MIT-compatible Labs module",
-    "release_posture": "private Labs, public later",
-    "description": "OpenCode session provenance from the local SQLite store. Each doc is an OpenCode session, with messages, parts, tool calls, patches, and read-derived file bodies.",
+    "release_posture": "private Labs preview; supports stable and v2 canonical SQLite history",
+    "description": "OpenCode session provenance from the local SQLite store. Each doc is an OpenCode session, with messages, parts, tool calls, patches, and read-derived file bodies. OpenCode v2 preserves this canonical history while its experimental event projections remain intentionally out of scope.",
     "default_cell_name": "opencode",
     "source_arg": "--opencode-db",
     "source_label": "OpenCode DB",

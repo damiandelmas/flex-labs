@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -29,7 +30,34 @@ except ImportError:  # pragma: no cover - older Flex core without shared bridge
     soma_enrich_operation = None
 
 
-DEFAULT_OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+def default_opencode_db() -> Path:
+    """Return OpenCode's active SQLite database using its documented path rules.
+
+    Stable, beta, and prod channels use ``opencode.db``. Local and other
+    channel builds use ``opencode-<channel>.db``; choose the newest of those
+    only when the canonical database is absent. An explicit ``OPENCODE_DB``
+    mirrors OpenCode's own database override and always wins.
+    """
+    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    data_dir = data_home / "opencode"
+    configured = os.environ.get("OPENCODE_DB")
+    if configured:
+        candidate = Path(configured).expanduser()
+        return candidate if candidate.is_absolute() else data_dir / candidate
+
+    canonical = data_dir / "opencode.db"
+    if canonical.exists():
+        return canonical
+
+    channel_dbs = sorted(
+        data_dir.glob("opencode-*.db"),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    return channel_dbs[0] if channel_dbs else canonical
+
+
+DEFAULT_OPENCODE_DB = default_opencode_db()
 
 
 OPENCODE_OPTIONAL_TABLES_DDL: tuple[str, ...] = (
