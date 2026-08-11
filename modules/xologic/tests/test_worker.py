@@ -122,8 +122,44 @@ def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch
         assert sha256(body).hexdigest() == digest
         assert db.execute("SELECT count(*) FROM xologic_source_observations WHERE requested_url LIKE '%#itemDetailFinish'").fetchone()[0] == 1
         assert db.execute("SELECT count(*) FROM spec_occurrences WHERE label='Finish' AND value='Black'").fetchone()[0] == 2
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert not tables & {"_raw_chunks", "_raw_sources", "chunks_fts"}
+        objects = {
+            (row[0], row[1]) for row in db.execute(
+                "SELECT type,name FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+            )
+        }
+        assert objects == {
+            ("table", "_metadata"), ("table", "_presets"),
+            ("table", "product_links"), ("table", "product_resources"),
+            ("table", "product_source_observations"), ("table", "products"),
+            ("table", "source_properties"), ("table", "spec_occurrences"),
+            ("table", "taxonomy_paths"), ("table", "xologic_content_objects"),
+            ("table", "xologic_editions"), ("table", "xologic_source_observations"),
+            ("view", "_meta"), ("view", "preferred_spec_occurrences"),
+            ("view", "resolved_products"), ("view", "spec_conflicts"),
+            ("view", "spec_occurrence_preference"),
+            ("trigger", "_meta_delete"), ("trigger", "_meta_insert"),
+            ("trigger", "_meta_update"),
+            ("index", "ix_links_product"), ("index", "ix_resources_product"),
+            ("index", "ix_source_content"), ("index", "ix_source_requested"),
+            ("index", "ix_spec_lookup"), ("index", "ix_spec_product"),
+            ("index", "ix_taxonomy_lookup"),
+        }
+        assert {row[0] for row in db.execute("SELECT name FROM _presets")} == {"orient"}
+        metadata = dict(db.execute("SELECT key,value FROM _metadata"))
+        assert metadata["provider"] == "xologic"
+        assert metadata["profile"] == "commerce-native"
+        assert metadata["authority"] == "provider-native-capture"
+        assert metadata["lifecycle"] == "refresh"
+        capabilities = json.loads(metadata["capabilities"])
+        assert capabilities["native_products"] == "present"
+        assert capabilities["source_recovery"] == "present"
+        assert capabilities["text_retrieval"] == "absent"
+        assert capabilities["text_embeddings"] == "absent"
+        assert capabilities["image_embeddings"] == "absent"
+        assert capabilities["relationship_interop"] == "absent"
+        assert capabilities["tree_navigation"] == "absent"
+        assert capabilities["operations_log"] == "absent"
         child_tables = ("source_properties", "spec_occurrences", "product_links", "product_resources")
         for table in child_tables:
             assert "raw_json" not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -134,7 +170,9 @@ def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch
         result = json.loads(execute_preset(db, "@orient", materializer=lambda _db, sql: sql,
                                            cell_name="bes_lighting_xologic"))
     assert any(row.get("query") == "shape" for row in result)
+    assert any(row.get("query") == "capabilities" for row in result)
     assert any(row.get("query") == "query_surface" for row in result)
+    assert "Fixture" not in json.dumps(result)
 
     dry = refresh(str(target), graph=True, dry_run=True, since_days=1)
     assert dry["dry_run"] is True and dry["seed_products"] == 1 and dry["products"] == 1
@@ -149,6 +187,16 @@ def test_atomic_replacement_rebuilds_same_logical_cell(tmp_path):
     assert first["cell_sha256"] != second["cell_sha256"]
     with sqlite3.connect(target) as db:
         assert db.execute("SELECT store_name FROM xologic_editions").fetchone()[0] == "Two"
+
+
+def test_identical_rebuild_is_byte_stable(tmp_path):
+    capture = _fixture(tmp_path / "capture")
+    first_path = tmp_path / "first.db"
+    second_path = tmp_path / "second.db"
+    first = build_cell(capture, first_path, store_name="Same")
+    second = build_cell(capture, second_path, store_name="Same")
+    assert first["cell_sha256"] == second["cell_sha256"]
+    assert first_path.read_bytes() == second_path.read_bytes()
 
 
 def test_tampered_raw_body_fails_closed_without_replacing_cell(tmp_path):
@@ -223,3 +271,37 @@ def test_source_only_option_sku_is_promoted_without_python_normalization(tmp_pat
             "WHERE product_ref=(SELECT product_ref FROM products WHERE url=?) ORDER BY depth",
             (option_url,),
         ).fetchone()[0] == "Pendants|Down Pendants"
+
+
+def test_registered_cell_attaches_read_only_through_meta(tmp_path, monkeypatch):
+    from flex import registry
+    from flex.meta import attach_registered_cells
+
+    flex_home = tmp_path / "flex-home"
+    cells = flex_home / "cells"
+    cells.mkdir(parents=True)
+    monkeypatch.setattr(registry, "FLEX_HOME", flex_home)
+    monkeypatch.setattr(registry, "CELLS_DIR", cells)
+    monkeypatch.setattr(registry, "REGISTRY_DB", flex_home / "registry.db")
+
+    capture = _fixture(tmp_path / "capture")
+    target = cells / "test_xologic.db"
+    build_cell(capture, target, store_name="Test")
+    registry.register_cell(
+        "test_xologic", target, cell_type="xologic",
+        description="Test XOLogic", lifecycle="refresh",
+        refresh_module="flex.modules.xologic.compile.refresh",
+    )
+
+    primary = sqlite3.connect(":memory:")
+    remaining, error = attach_registered_cells(
+        primary,
+        "ATTACH 'test_xologic' AS catalogue; "
+        "SELECT count(*) FROM catalogue.products",
+        explicit_cells={"test_xologic"},
+        available_cells={"test_xologic"},
+    )
+    assert error is None
+    assert primary.execute(remaining).fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        primary.execute("DELETE FROM catalogue.products")

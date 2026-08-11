@@ -15,7 +15,7 @@ MODULE = {
     "refresh_interval": 6 * 60 * 60,
     "presets_from": ("xologic",),
     "instructions_from": ("xologic",),
-    "query_examples": ("@orient", "@products"),
+    "query_examples": ("@orient",),
 }
 
 

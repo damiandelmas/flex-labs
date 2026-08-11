@@ -118,38 +118,6 @@ FROM products p;
 """
 
 
-ORIENT_SQL = """-- @name: orient
--- @description: XOLogic native catalogue query contract
--- @multi: true
--- @query: about
-SELECT value AS description FROM _metadata WHERE key='description';
--- @query: edition
-SELECT edition_id,store_name,product_count,source_observation_count,products_sha256 FROM xologic_editions;
--- @query: shape
-SELECT 'products' what,count(*) n FROM products
-UNION ALL SELECT 'source observations',count(*) FROM xologic_source_observations
-UNION ALL SELECT 'content objects',count(*) FROM xologic_content_objects
-UNION ALL SELECT 'spec occurrences',count(*) FROM spec_occurrences
-UNION ALL SELECT 'taxonomy paths',count(*) FROM taxonomy_paths
-UNION ALL SELECT 'links',count(*) FROM product_links
-UNION ALL SELECT 'resources',count(*) FROM product_resources;
--- @query: query_surface
-SELECT m.type AS kind,m.name,GROUP_CONCAT(p.name,', ') AS columns
-FROM sqlite_master m JOIN pragma_table_info(m.name) p
-WHERE m.name IN ('products','xologic_source_observations','xologic_content_objects',
- 'source_properties','spec_occurrences','taxonomy_paths','product_links','product_resources',
- 'preferred_spec_occurrences','spec_conflicts','resolved_products')
-GROUP BY m.type,m.name ORDER BY m.name;
--- @query: examples
-SELECT 'products in an exact category and subcategory' purpose,
- 'SELECT p.title,p.url FROM products p JOIN taxonomy_paths c ON c.product_ref=p.product_ref AND c.depth=1 JOIN taxonomy_paths s ON s.product_ref=p.product_ref AND s.depth=2 WHERE c.label=:category AND s.label=:subcategory;' sql
-UNION ALL SELECT 'products with an exact published specification',
- 'SELECT p.title,p.url,o.label,o.value FROM products p JOIN spec_occurrences o USING(product_ref) WHERE o.label=:label AND o.value=:value;'
-UNION ALL SELECT 'inspect all source values before preference',
- 'SELECT source_layer,source_order,label,value,locator FROM spec_occurrences WHERE product_ref=:product_ref AND lower(label)=lower(:label) ORDER BY source_order;';
-"""
-
-
 class CaptureError(RuntimeError):
     pass
 
@@ -305,15 +273,28 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
         db.execute("INSERT INTO xologic_editions VALUES(?,?,?,?,?,?,?)",
                    (edition_id,str(paths["root"]),store_name,receipt_id,products_sha,len(products),len(source_rows)))
         metadata = {
-            "cell_type":"xologic","schema_version":FORMAT,
+            "cell_type":"xologic","provider":"xologic",
+            "profile":"commerce-native","schema_version":FORMAT,
             "description":f"{store_name or 'XOLogic'} source-faithful native catalogue",
             "capture_path":str(paths["root"]),"store_name":store_name or "XOLogic",
             "evidence_receipt":receipt_id,"products_sha256":products_sha,
-            "refresh_module":REFRESH_MODULE,
+            "lifecycle":"refresh","refresh_module":REFRESH_MODULE,
+            "authority":"provider-native-capture",
+            "capabilities":_canonical({
+                "native_products":"present",
+                "source_recovery":"present",
+                "taxonomy":"present",
+                "product_links":"present",
+                "product_resources":"present",
+                "text_retrieval":"absent",
+                "text_embeddings":"absent",
+                "image_embeddings":"absent",
+                "relationship_interop":"absent",
+                "tree_navigation":"absent",
+                "operations_log":"absent",
+            }),
         }
         db.executemany("INSERT INTO _metadata(key,value) VALUES(?,?)",metadata.items())
-        db.execute("INSERT INTO _presets(name,description,params,sql,source) VALUES(?,?,?,?,?)",
-                   ("orient","XOLogic native catalogue query contract","",ORIENT_SQL,"xologic"))
         from flex.retrieve.presets import install_presets
         install_presets(db, Path(__file__).resolve().parent.parent / "stock" / "presets",
                         record_operation=False)
