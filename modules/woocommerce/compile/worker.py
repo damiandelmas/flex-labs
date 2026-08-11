@@ -24,6 +24,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+import inspect
 import json
 from math import ceil
 import os
@@ -1007,7 +1008,15 @@ def install_stock_assets(db: sqlite3.Connection) -> None:
     if presets_dir.exists():
         from flex.retrieve.presets import install_presets
 
-        install_presets(db, presets_dir, record_operation=False)
+        # The direct module is intended to run against the installed Flex service
+        # as well as the development checkout.  Older Flex releases expose the
+        # same installer without the optional operation-recording argument.
+        kwargs = (
+            {"record_operation": False}
+            if "record_operation" in inspect.signature(install_presets).parameters
+            else {}
+        )
+        install_presets(db, presets_dir, **kwargs)
 
 
 def finalize_native_cell(
