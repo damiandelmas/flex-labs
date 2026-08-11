@@ -1034,6 +1034,10 @@ def finalize_native_cell(
         db.row_factory = sqlite3.Row
         install_stock_assets(db)
         _set_meta(db, "cell_type", "woocommerce")
+        # This is a native relational catalogue queried directly with SQL. It has no
+        # generic text corpus or embedding contract, so explicitly prevent Flex from
+        # building an empty VectorCache for every commerce cell at service startup.
+        _set_meta(db, "embed", "false")
         _set_meta(db, "description", description or "Raw WooCommerce Store API catalogue")
         _set_meta(db, "store_url", store_url.rstrip("/"))
         _set_meta(db, "per_page", str(per_page))

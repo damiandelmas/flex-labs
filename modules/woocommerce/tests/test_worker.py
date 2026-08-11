@@ -160,7 +160,8 @@ def test_raw_capture_staging_and_atomic_cell_preserve_store_population(tmp_path,
         assert "catalogue_json_values" in self_orient
         assert "catalogue_json_values" in orient
         meta_keys = {row[0] for row in db.execute("SELECT key FROM _meta").fetchall()}
-        assert {"cell_type", "description", "store_url", "scope"}.issubset(meta_keys)
+        assert {"cell_type", "embed", "description", "store_url", "scope"}.issubset(meta_keys)
+        assert db.execute("SELECT value FROM _meta WHERE key='embed'").fetchone()[0] == "false"
         assert db.execute("SELECT value FROM _meta WHERE key='store_url'").fetchone()[0] == SITE
 
     from flex.engine import execute_preset
