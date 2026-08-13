@@ -10,12 +10,27 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 from typing import Any
 from urllib.parse import urldefrag
 
 FORMAT = "xologic-native-flex/v1"
+BUILD_RECEIPT_SCHEMA = "xologic-native-flex-build/v1"
 REFRESH_MODULE = "flex.modules.xologic.compile.refresh"
+MODULE_ROOT = Path(__file__).resolve().parent.parent
+REQUIRED_CAPTURE_ARTIFACTS = {
+    "source_objects", "spec_occurrences", "relations", "asset_inventory",
+}
+MODULE_IDENTITY_PATHS = (
+    "compile/worker.py",
+    "compile/recipes.py",
+    "stock/presets/orient.sql",
+    "stock/sql/lighting_projection.sql",
+    "stock/sql/product_search.sql",
+    "stock/instructions.md",
+)
 
 
 SCHEMA = """
@@ -49,13 +64,16 @@ CREATE TABLE product_source_observations(
   PRIMARY KEY(product_ref,source_id)
 );
 CREATE TABLE source_properties(
-  property_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL REFERENCES xologic_content_objects,
+  property_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES xologic_source_observations,
+  content_hash TEXT NOT NULL REFERENCES xologic_content_objects,
   source_order INTEGER NOT NULL, tag TEXT, property_attribute TEXT,
   property TEXT, value_attribute TEXT, value TEXT, locator TEXT,
   attributes_json TEXT, raw_start_tag TEXT
 );
 CREATE TABLE spec_occurrences(
   occurrence_id TEXT PRIMARY KEY, product_ref TEXT REFERENCES products,
+  source_id TEXT NOT NULL REFERENCES xologic_source_observations,
   content_hash TEXT NOT NULL REFERENCES xologic_content_objects,
   source_layer TEXT, source_order INTEGER NOT NULL, surface_ordinal INTEGER,
   label TEXT NOT NULL, value TEXT NOT NULL, locator TEXT,
@@ -68,14 +86,17 @@ CREATE TABLE taxonomy_paths(
 );
 CREATE TABLE product_links(
   link_id TEXT PRIMARY KEY, product_ref TEXT REFERENCES products,
+  source_id TEXT NOT NULL REFERENCES xologic_source_observations,
   content_hash TEXT REFERENCES xologic_content_objects, kind TEXT NOT NULL,
   url TEXT NOT NULL, locator TEXT, scope TEXT, raw_href TEXT,
   target_id TEXT, target_source_id TEXT, target_object_kind TEXT
 );
 CREATE TABLE product_resources(
   resource_id TEXT PRIMARY KEY, product_ref TEXT REFERENCES products,
+  source_id TEXT NOT NULL REFERENCES xologic_source_observations,
   content_hash TEXT REFERENCES xologic_content_objects, kind TEXT NOT NULL,
-  url TEXT NOT NULL, asset_id TEXT, raw_href TEXT, locator TEXT, scope TEXT
+  url TEXT NOT NULL, asset_id TEXT, raw_href TEXT, locator TEXT,
+  locators_json TEXT NOT NULL, scope TEXT
 );
 CREATE INDEX ix_source_requested ON xologic_source_observations(requested_url);
 CREATE INDEX ix_source_content ON xologic_source_observations(content_hash);
@@ -138,6 +159,65 @@ def _digest_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sha256_uri(digest: str) -> str:
+    return digest if digest.startswith("sha256:") else "sha256:" + digest
+
+
+def _module_identity() -> dict[str, Any]:
+    file_hashes: dict[str, str] = {}
+    for relative in MODULE_IDENTITY_PATHS:
+        path = MODULE_ROOT / relative
+        if not path.is_file():
+            raise CaptureError(f"missing XOLogic module source: {path}")
+        file_hashes[relative] = _sha256_uri(_digest_file(path))
+    source_hash = _sha256_uri(
+        _digest_bytes(_canonical(file_hashes).encode("utf-8"))
+    )
+    git_head: str | None = None
+    git_dirty: bool | None = None
+    try:
+        repo_root = Path(subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=MODULE_ROOT,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip())
+        git_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        identity_paths = [
+            str((MODULE_ROOT / relative).relative_to(repo_root))
+            for relative in MODULE_IDENTITY_PATHS
+        ]
+        git_dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain", "--", *identity_paths], cwd=repo_root,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip())
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        pass
+    return {
+        "format": FORMAT,
+        "module_git_head": git_head,
+        "module_dirty": git_dirty,
+        "module_file_hashes": file_hashes,
+        "module_source_hash": source_hash,
+    }
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        temporary.write_text(_canonical(value) + "\n")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _stable_id(prefix: str, *values: Any) -> str:
     return prefix + "_" + _digest_bytes(_canonical(values).encode())
 
@@ -169,9 +249,20 @@ def _capture_paths(capture: Path) -> dict[str, Path]:
 
 def _verify_receipt(paths: dict[str, Path]) -> dict[str, Any]:
     receipt = json.loads(paths["receipt"].read_text())
-    if receipt.get("complete") is not True or receipt.get("sealed") is not True:
+    if (receipt.get("schema_version") != "xologic-lossless/v1"
+            or receipt.get("complete") is not True
+            or receipt.get("sealed") is not True):
         raise CaptureError("XOLogic evidence receipt is not sealed and complete")
-    for artifact, expected in (receipt.get("artifact_hashes") or {}).items():
+    if receipt.get("frontier_exhausted") is not True:
+        raise CaptureError("XOLogic evidence frontier is not exhausted")
+    if not isinstance(receipt.get("receipt_hash"), str):
+        raise CaptureError("XOLogic evidence receipt has no identity")
+    artifact_hashes = receipt.get("artifact_hashes")
+    if (not isinstance(artifact_hashes, dict)
+            or not REQUIRED_CAPTURE_ARTIFACTS.issubset(artifact_hashes)):
+        raise CaptureError("XOLogic evidence receipt lacks required artifact hashes")
+    for artifact in sorted(REQUIRED_CAPTURE_ARTIFACTS):
+        expected = artifact_hashes[artifact]
         path = paths["root"] / "evidence" / f"{artifact}.json"
         if not path.is_file() or "sha256:" + _digest_file(path) != expected:
             raise CaptureError(f"evidence artifact hash mismatch: {artifact}")
@@ -186,8 +277,11 @@ def _product_ref(product: dict[str, Any]) -> str:
 
 
 def _price(product: dict[str, Any]) -> str | None:
+    if product.get("price") is not None:
+        return str(product["price"])
     variants = product.get("variants") or []
-    if variants and isinstance(variants[0],dict) and variants[0].get("price") is not None:
+    if (len(variants) == 1 and isinstance(variants[0],dict)
+            and variants[0].get("price") is not None):
         return str(variants[0]["price"])
     return None
 
@@ -258,6 +352,31 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
     occurrence_rows = _load_rows(paths["spec_occurrences"])
     relation_rows = _load_rows(paths["relations"])
     asset_rows = _load_rows(paths["asset_inventory"])
+    artifact_rows = {
+        "source_objects": source_rows,
+        "spec_occurrences": occurrence_rows,
+        "relations": relation_rows,
+        "asset_inventory": asset_rows,
+    }
+    for artifact, rows in artifact_rows.items():
+        expected = (receipt.get("artifact_counts") or {}).get(artifact)
+        if expected is None or len(rows) != int(expected):
+            raise CaptureError(f"evidence artifact count mismatch: {artifact}")
+    source_ids = {str(row.get("source_id")) for row in source_rows if row.get("source_id")}
+    expected_counts = {
+        "source_properties": sum(len(row.get("structured_properties") or []) for row in source_rows),
+        "spec_occurrences": len(occurrence_rows),
+        "product_links": sum(
+            1 for row in relation_rows
+            if str(row.get("source_id") or "") in source_ids
+            and isinstance(row.get("target_url"), str) and row.get("target_url")
+        ),
+        "product_resources": sum(
+            sum(1 for source_id in (row.get("source_ids") or []) if str(source_id) in source_ids)
+            for row in asset_rows
+            if isinstance(row.get("url"), str) and row.get("url")
+        ),
+    }
     products_sha = _digest_file(paths["products"])
     receipt_id = str(receipt.get("receipt_hash") or "sha256:" + _digest_file(paths["receipt"]))
     edition_id = _stable_id("edition",products_sha,receipt_id)
@@ -278,6 +397,7 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
             "description":f"{store_name or 'XOLogic'} source-faithful native catalogue",
             "capture_path":str(paths["root"]),"store_name":store_name or "XOLogic",
             "evidence_receipt":receipt_id,"products_sha256":products_sha,
+            **{f"expected_{key}": str(value) for key,value in expected_counts.items()},
             "lifecycle":"refresh","refresh_module":REFRESH_MODULE,
             "authority":"provider-native-capture",
             "capabilities":_canonical({
@@ -286,7 +406,7 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
                 "taxonomy":"present",
                 "product_links":"present",
                 "product_resources":"present",
-                "text_retrieval":"absent",
+                "text_retrieval":"products_fts",
                 "text_embeddings":"absent",
                 "image_embeddings":"absent",
                 "relationship_interop":"absent",
@@ -348,11 +468,11 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
                 db.execute("INSERT OR IGNORE INTO product_source_observations VALUES(?,?)",(mapped,source_id))
             for prop in row.get("structured_properties") or []:
                 if not isinstance(prop,dict): continue
-                values=(expected,prop.get("surface_ordinal"),prop.get("tag"),prop.get("property_attribute"),
+                values=(source_id,expected,prop.get("surface_ordinal"),prop.get("tag"),prop.get("property_attribute"),
                         prop.get("property"),prop.get("value_attribute"),prop.get("value"),prop.get("locator"))
                 pid=_stable_id("property",*values)
-                db.execute("INSERT OR IGNORE INTO source_properties VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (pid,expected,int(prop.get("surface_ordinal") or 0),prop.get("tag"),prop.get("property_attribute"),
+                db.execute("INSERT OR IGNORE INTO source_properties VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (pid,source_id,expected,int(prop.get("surface_ordinal") or 0),prop.get("tag"),prop.get("property_attribute"),
                      prop.get("property"),prop.get("value_attribute"),prop.get("value"),prop.get("locator"),
                      _canonical(prop.get("attributes") or {}),prop.get("raw_start_tag")))
 
@@ -378,7 +498,8 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
                 max(CASE WHEN lower(p.property)='schema:image' THEN p.value END) image,
                 max(CASE WHEN lower(p.property)='schema:description' THEN p.value END) description
               FROM xologic_source_observations s
-              JOIN source_properties p USING(content_hash)
+              JOIN source_properties p
+                ON p.source_id=s.source_id AND p.content_hash=s.content_hash
               GROUP BY s.source_id
             )
             SELECT r.final_url,p.name,p.sku,p.mpn,p.gtin,p.price,p.image,p.description
@@ -418,12 +539,12 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
             label=row.get("clean_label") if row.get("clean_label") is not None else row.get("label")
             value=row.get("clean_value") if row.get("clean_value") is not None else row.get("value")
             if label is None or value is None: raise CaptureError("occurrence lacks label/value")
-            signature=(source_product.get(str(sid)),content,row.get("source_layer"),row.get("source_order"),
+            signature=(str(sid),source_product.get(str(sid)),content,row.get("source_layer"),row.get("source_order"),
                        row.get("surface_ordinal"),str(label),str(value),row.get("locator"),row.get("raw_label"),row.get("raw_value"))
             oid=_stable_id("occurrence",*signature)
             visible=(row.get("visibility_evidence") or {}).get("hidden") is False
-            db.execute("INSERT OR IGNORE INTO spec_occurrences VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (oid,source_product.get(str(sid)),content,row.get("source_layer"),int(row.get("source_order") or 0),
+            db.execute("INSERT OR IGNORE INTO spec_occurrences VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (oid,source_product.get(str(sid)),str(sid),content,row.get("source_layer"),int(row.get("source_order") or 0),
                  row.get("surface_ordinal"),str(label),str(value),row.get("locator"),row.get("raw_label"),row.get("raw_value"),
                  row.get("row_classes"),int(visible),_canonical(row.get("visibility_evidence") or {})))
 
@@ -431,23 +552,24 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
             sid=str(row.get("source_id") or ""); content=source_hash.get(sid); url=row.get("target_url")
             if not content or not isinstance(url,str) or not url: continue
             product_ref=source_product.get(sid)
-            signature=(product_ref,content,row.get("kind"),url,row.get("locator"),row.get("scope"),row.get("target_id"))
-            db.execute("INSERT OR IGNORE INTO product_links VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (_stable_id("link",*signature),product_ref,content,str(row.get("kind") or "link"),url,row.get("locator"),
+            signature=(sid,product_ref,content,row.get("kind"),url,row.get("locator"),row.get("scope"),row.get("target_id"))
+            db.execute("INSERT OR IGNORE INTO product_links VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (_stable_id("link",*signature),product_ref,sid,content,str(row.get("kind") or "link"),url,row.get("locator"),
                  row.get("scope"),row.get("raw_href"),row.get("target_id"),row.get("target_source_id"),row.get("target_object_kind")))
 
         for row in asset_rows:
             url=row.get("url")
             if not isinstance(url,str) or not url: continue
             source_ids=[str(v) for v in (row.get("source_ids") or [])] or [""]
-            mapped={(source_product.get(sid),source_hash.get(sid)) for sid in source_ids}
-            if not mapped: mapped={(None,None)}
-            for product_ref,content in sorted(mapped,key=lambda pair:((pair[0] or ""),(pair[1] or ""))):
-                signature=(product_ref,content,row.get("object_kind"),url,row.get("asset_id"))
-                locators=row.get("locators") or []
-                db.execute("INSERT OR IGNORE INTO product_resources VALUES(?,?,?,?,?,?,?,?,?)",
-                    (_stable_id("resource",*signature),product_ref,content,str(row.get("object_kind") or "resource"),url,
-                     row.get("asset_id"),row.get("raw_href"),locators[0] if locators else None,row.get("scope")))
+            mapped=[(sid,source_product.get(sid),source_hash.get(sid)) for sid in source_ids
+                    if source_hash.get(sid)]
+            for sid,product_ref,content in sorted(mapped,key=lambda item:(item[0],item[1] or "",item[2] or "")):
+                signature=(sid,product_ref,content,row.get("object_kind"),url,row.get("asset_id"))
+                locators=[str(locator) for locator in (row.get("locators") or [])]
+                db.execute("INSERT OR IGNORE INTO product_resources VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (_stable_id("resource",*signature),product_ref,sid,content,str(row.get("object_kind") or "resource"),url,
+                     row.get("asset_id"),row.get("raw_href"),locators[0] if locators else None,
+                     _canonical(locators),row.get("scope")))
 
         # Source-only option products receive their published taxonomy through
         # the same native occurrence surface rather than Python label folding.
@@ -457,6 +579,16 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
         db.execute("""INSERT OR IGNORE INTO taxonomy_paths(product_ref,depth,label)
                       SELECT product_ref,2,value FROM preferred_spec_occurrences
                       WHERE lower(label)='subcategory'""")
+        projection_sql = (Path(__file__).resolve().parent.parent / "stock" / "sql" /
+                          "lighting_projection.sql")
+        if not projection_sql.is_file():
+            raise CaptureError(f"missing XOLogic SQL projection: {projection_sql}")
+        db.executescript(projection_sql.read_text())
+        search_sql = (Path(__file__).resolve().parent.parent / "stock" / "sql" /
+                      "product_search.sql")
+        if not search_sql.is_file():
+            raise CaptureError(f"missing XOLogic product search projection: {search_sql}")
+        db.executescript(search_sql.read_text())
         db.commit()
         if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise CaptureError("SQLite integrity check failed")
@@ -477,24 +609,177 @@ def verify_cell(path: Path) -> dict[str,Any]:
                 ("products","xologic_source_observations","xologic_content_objects","source_properties","spec_occurrences","taxonomy_paths","product_links","product_resources")}
         if counts["products"]!=edition[0]["product_count"] or counts["xologic_source_observations"]!=edition[0]["source_observation_count"]:
             raise CaptureError("cell population differs from edition receipt")
+        metadata = dict(db.execute("SELECT key,value FROM _metadata"))
+        for relation in ("source_properties", "spec_occurrences", "product_links", "product_resources"):
+            expected = metadata.get(f"expected_{relation}")
+            if expected is None or counts[relation] != int(expected):
+                raise CaptureError(f"{relation} population differs from sealed capture")
         for row in db.execute("SELECT content_hash,byte_count,body FROM xologic_content_objects"):
             if len(row["body"])!=row["byte_count"] or _digest_bytes(bytes(row["body"]))!=row["content_hash"]:
                 raise CaptureError("content object hash/size differs")
         forbidden={"_raw_chunks","_raw_sources","chunks_fts"}
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if tables & forbidden: raise CaptureError("generic retrieval tables are forbidden")
-        return {**counts,"integrity_check":"ok","edition_id":edition[0]["edition_id"],"cell_sha256":_digest_file(path)}
+        product_count = counts["products"]
+        search_document_count = int(db.execute(
+            "SELECT count(*) FROM product_search_documents"
+        ).fetchone()[0])
+        search_index_count = int(db.execute(
+            "SELECT count(*) FROM products_fts"
+        ).fetchone()[0])
+        dossier_count = int(db.execute(
+            "SELECT count(*) FROM product_dossiers"
+        ).fetchone()[0])
+        dossier_payload_count = int(db.execute(
+            "SELECT count(*) FROM product_dossier_payloads"
+        ).fetchone()[0])
+        product_identifier_count = int(db.execute(
+            "SELECT count(*) FROM product_identifiers"
+        ).fetchone()[0])
+        if (search_document_count != product_count
+                or search_index_count != product_count
+                or dossier_count != product_count
+                or dossier_payload_count != product_count):
+            raise CaptureError(
+                "product retrieval coverage differs from product population: "
+                f"{search_document_count}/{search_index_count}/{dossier_count}/"
+                f"{dossier_payload_count} "
+                f"!= {product_count}"
+            )
+        if product_count and product_identifier_count == 0:
+            raise CaptureError("product identifier projection is empty")
+        orient = db.execute(
+            "SELECT sql FROM _presets WHERE name='orient'"
+        ).fetchone()
+        required_orient_relations = {
+            "resolved_spec_values", "products_fts", "product_identifiers",
+            "product_dossiers", "product_dossier_payloads",
+        }
+        if orient is None or any(name not in orient[0] for name in required_orient_relations):
+            raise CaptureError("@orient does not declare the enriched XOLogic surface")
+        expected_orient = (MODULE_ROOT / "stock" / "presets" / "orient.sql").read_text()
+        if orient[0] != expected_orient:
+            raise CaptureError("installed @orient differs from the authored XOLogic contract")
+        page_count = int(db.execute("PRAGMA page_count").fetchone()[0])
+        page_size = int(db.execute("PRAGMA page_size").fetchone()[0])
+        return {
+            **counts,
+            "product_search_documents": search_document_count,
+            "products_fts": search_index_count,
+            "product_dossiers": dossier_count,
+            "product_dossier_payloads": dossier_payload_count,
+            "product_identifiers": product_identifier_count,
+            "integrity_check":"ok",
+            "retrieval_denominator_match": True,
+            "orient_declares_enriched_surface": True,
+            "sqlite_page_count": page_count,
+            "sqlite_page_size": page_size,
+            "edition_id":edition[0]["edition_id"],
+            "products_sha256": edition[0]["products_sha256"],
+            "orient_sha256": _digest_bytes(orient[0].encode("utf-8")),
+            "cell_sha256":_digest_file(path),
+        }
 
 
-def build_cell(capture: Path, cell_path: Path, *, store_name: str | None=None) -> dict[str,Any]:
+def _build_receipt(capture: Path, cell_path: Path, verification: dict[str, Any],
+                   *, store_name: str | None) -> dict[str, Any]:
+    paths = _capture_paths(capture)
+    capture_receipt = _verify_receipt(paths)
+    module = _module_identity()
+    count_names = (
+        "products", "xologic_source_observations", "xologic_content_objects",
+        "source_properties", "spec_occurrences", "taxonomy_paths",
+        "product_links", "product_resources", "product_search_documents",
+        "products_fts", "product_identifiers", "product_dossiers",
+        "product_dossier_payloads",
+    )
+    counts = {name: int(verification[name]) for name in count_names}
+    receipt: dict[str, Any] = {
+        "schema_version": BUILD_RECEIPT_SCHEMA,
+        "locations": {
+            "capture_path": str(paths["root"]),
+            "cell_path": str(Path(cell_path).resolve()),
+        },
+        "input": {
+            "capture_receipt_hash": capture_receipt["receipt_hash"],
+            "capture_receipt_file_sha256": _sha256_uri(_digest_file(paths["receipt"])),
+            "capture_schema_version": capture_receipt.get("schema_version"),
+            "capture_artifact_hashes": capture_receipt.get("artifact_hashes") or {},
+            "capture_artifact_counts": capture_receipt.get("artifact_counts") or {},
+            "raw_inventory_hash": capture_receipt.get("raw_inventory_hash"),
+            "raw_inventory_count": capture_receipt.get("raw_inventory_count"),
+            "factory_implementation_identities": (
+                capture_receipt.get("implementation_identities") or {}
+            ),
+            "factory_implementation_manifest_hash": (
+                capture_receipt.get("implementation_manifest_hash")
+            ),
+        },
+        "module": module,
+        "environment": {
+            "python_version": ".".join(str(value) for value in sys.version_info[:3]),
+            "sqlite_version": sqlite3.sqlite_version,
+        },
+        "output": {
+            "cell_sha256": _sha256_uri(verification["cell_sha256"]),
+            "sqlite_page_count": verification["sqlite_page_count"],
+            "sqlite_page_size": verification["sqlite_page_size"],
+            "integrity_check": verification["integrity_check"],
+            "edition_id": verification["edition_id"],
+            "products_sha256": _sha256_uri(verification["products_sha256"]),
+            "orient_sha256": _sha256_uri(verification["orient_sha256"]),
+            "store_name": store_name or "XOLogic",
+        },
+        "counts": counts,
+        "validation": {
+            "native_population_match": True,
+            "retrieval_denominator_match": verification["retrieval_denominator_match"],
+            "orient_declares_enriched_surface": (
+                verification["orient_declares_enriched_surface"]
+            ),
+        },
+    }
+    identity = {
+        "schema_version": receipt["schema_version"],
+        "input": receipt["input"],
+        "module": {
+            "format": module["format"],
+            "module_file_hashes": module["module_file_hashes"],
+            "module_source_hash": module["module_source_hash"],
+        },
+        "environment": receipt["environment"],
+        "output": receipt["output"],
+        "counts": receipt["counts"],
+        "validation": receipt["validation"],
+    }
+    receipt["content_identity_sha256"] = _sha256_uri(
+        _digest_bytes(_canonical(identity).encode("utf-8"))
+    )
+    return {
+        **receipt,
+        **verification,
+        "cell": str(Path(cell_path)),
+        "atomic_replace": True,
+    }
+
+
+def build_cell(capture: Path, cell_path: Path, *, store_name: str | None=None,
+               receipt_path: Path | None = None) -> dict[str,Any]:
     target=Path(cell_path); target.parent.mkdir(parents=True,exist_ok=True)
+    if receipt_path is not None and Path(receipt_path).resolve() == target.resolve():
+        raise CaptureError("build receipt path must differ from the SQLite artifact path")
     staging_root=Path(tempfile.mkdtemp(prefix=f".{target.stem}.xologic.",dir=target.parent))
     try:
         staging=staging_root/(target.name+".native")
-        receipt=_build_database(Path(capture),staging,store_name)
+        _build_database(Path(capture),staging,store_name)
         verify_cell(staging)
         os.replace(staging,target)
-        return {**receipt,"cell":str(target),"atomic_replace":True}
+        receipt = _build_receipt(
+            Path(capture), target, verify_cell(target), store_name=store_name
+        )
+        if receipt_path is not None:
+            _write_json_atomic(Path(receipt_path), receipt)
+        return receipt
     finally:
         shutil.rmtree(staging_root,ignore_errors=True)
 
@@ -510,9 +795,11 @@ def main(argv=None) -> int:
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture",required=True); parser.add_argument("--cell",required=True)
     parser.add_argument("--store-name"); parser.add_argument("--register",action="store_true")
+    parser.add_argument("--receipt")
     args=parser.parse_args(argv)
     target=Path(args.cell)
-    receipt=build_cell(Path(args.capture),target,store_name=args.store_name)
+    receipt=build_cell(Path(args.capture),target,store_name=args.store_name,
+                       receipt_path=Path(args.receipt) if args.receipt else None)
     if args.register: register_cell_path(target.stem,target)
     print(json.dumps(receipt,indent=2)); return 0
 
