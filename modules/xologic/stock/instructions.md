@@ -32,6 +32,14 @@ part numbers, vendors, taxonomy, and published specifications. Join through
 structured requirements there. FTS relevance finds candidates; it does not
 establish that a product satisfies a mandatory specification.
 
+SQLite FTS5 requires the actual virtual-table name as the left operand of
+`MATCH` and as the argument to `bm25()`. Do not alias `products_fts`; write
+`products_fts MATCH ...` and `bm25(products_fts,...)` exactly.
+
+When the tool returns a retryable SQL error, preserve the customer's complete
+constraint set, correct only the failed SQL, and call the tool once more. Do not
+broaden the request merely to make a failed query return rows.
+
 Every product returned across the tool boundary must be a complete row from
 `product_dossiers`. Search, filter, rank, and count with narrower relations
 inside CTEs, retain the resulting `product_ref` values, and join those identities
