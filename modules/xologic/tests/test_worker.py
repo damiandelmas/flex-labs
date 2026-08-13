@@ -285,6 +285,10 @@ def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch
         db.row_factory = sqlite3.Row
         result = json.loads(execute_preset(db, "@orient", materializer=lambda _db, sql: sql,
                                            cell_name="bes_lighting_xologic"))
+    assert {row.get("query") for row in result} == {
+        "identity", "capabilities", "edition", "shape", "query_surface",
+        "limitations",
+    }
     assert any(row.get("query") == "shape" for row in result)
     assert any(row.get("query") == "capabilities" for row in result)
     assert any(row.get("query") == "query_surface" for row in result)

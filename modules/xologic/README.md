@@ -46,6 +46,8 @@ raw object named by a source observation. Preference, conflicts, and resolved
 products are SQL projections. `product_search_documents` and `products_fts`
 provide derived product-specific keyword discovery over titles, identifiers,
 vendors, taxonomy, and published specifications; native relations remain the
-authority for returned facts. `@orient` is the only installed saved query.
+authority for returned facts. `@orient` is the only installed saved query and
+contains only the cell's schema and query contract; retrieval methods and SQL
+recipes live in `stock/instructions.md`.
 Generic chunks, embeddings, graphs, R2 publication, tenant configuration, and
 Felix behavior are outside this module.
