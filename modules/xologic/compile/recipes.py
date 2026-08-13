@@ -11,7 +11,7 @@ import re
 import sqlite3
 from typing import Any
 
-from .worker import _canonical, _digest_file, _sha256_uri, _write_json_atomic
+from .worker import _digest_file, _sha256_uri, _write_json_atomic
 
 
 VALIDATION_SCHEMA = "xologic-recipe-validation/v1"
@@ -22,25 +22,9 @@ REQUIRED_PRODUCT_COLUMNS = {
     "title", "specifications_json",
 }
 
-# Exact baseline from session 019ff9cc-228b-7b70-ab3c-a92481d8060a,
-# message 2879, plus the first SKU captured by the same validation run.
-BES_BASELINE = (
-    (5, 5, False, 26213, "43999BK"),
-    (492, 5, True, 12744, "10264 BK"),
-    (69, 5, True, 21820, "12724FB3"),
-    (47, 5, True, 21637, "HF1170-BK"),
-    (1, 1, False, 4300, "12430SB4"),
-    (1, 1, False, 5536, "OL13701TXB-L1"),
-    (70, 5, True, 25228, "8-8888-18-BK"),
-    (66, 5, True, 23003, "AC12150BB"),
-    (2, 2, False, 8872, "12430SB4"),
-    (5, 5, False, 26213, "43999BK"),
-    (3, 3, False, 15653, "43999BK"),
-    (28, 5, True, 20570, "55902CRBK"),
-    (2, 2, False, 8872, "50504-SB"),
-    (26, 5, True, 20615, "LCH288A16BK"),
-    (25, 5, True, 17297, "539-2-59"),
-)
+# Expected match populations for the sealed BES edition. Payload sizes and row
+# ordering are checked structurally instead of frozen into another data copy.
+BES_EXPECTED_TOTALS = (5, 492, 69, 47, 1, 1, 70, 66, 2, 5, 3, 28, 2, 26, 25)
 
 
 class RecipeContractError(RuntimeError):
@@ -154,9 +138,7 @@ def _validate_one(db: sqlite3.Connection, number: int, sql: str,
             ).fetchone()[0])
             for product_ref in product_refs
         )
-        first_sku = rows[0]["sku"] if rows else None
-        expected = BES_BASELINE[number - 1]
-        observed = (total, returned, has_more, payload_chars, first_sku)
+        expected_total = BES_EXPECTED_TOTALS[number - 1]
         structural_ok = (
             not missing
             and len(rows) <= 5
@@ -167,18 +149,13 @@ def _validate_one(db: sqlite3.Connection, number: int, sql: str,
         )
         return {
             "query": number,
-            "ok": structural_ok and observed == expected,
+            "ok": structural_ok and total == expected_total,
             "total": total,
+            "expected_total": expected_total,
             "returned": returned,
             "has_more": has_more,
             "payload_chars": payload_chars,
-            "first_sku": first_sku,
             "missing": missing,
-            "expected": {
-                "total": expected[0], "returned": expected[1],
-                "has_more": expected[2], "payload_chars": expected[3],
-                "first_sku": expected[4],
-            },
         }
     except Exception as error:  # The receipt must retain the exact failed query boundary.
         return {
@@ -188,18 +165,10 @@ def _validate_one(db: sqlite3.Connection, number: int, sql: str,
         }
 
 
-def validate_bes_recipes(cell_path: Path, *, build_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_bes_recipes(cell_path: Path) -> dict[str, Any]:
     target = Path(cell_path).resolve()
     recipes, sql_digest = load_recipes()
     cell_sha256 = _sha256_uri(_digest_file(target))
-    build_identity = None
-    if build_receipt is not None:
-        expected_cell = (build_receipt.get("output") or {}).get("cell_sha256")
-        if expected_cell != cell_sha256:
-            raise RecipeContractError(
-                "build receipt does not identify the database under validation"
-            )
-        build_identity = build_receipt.get("content_identity_sha256")
     with sqlite3.connect(f"file:{target}?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
         bindings = _bes_bindings(db)
@@ -208,39 +177,26 @@ def validate_bes_recipes(cell_path: Path, *, build_receipt: dict[str, Any] | Non
             for number, (sql, params) in enumerate(zip(recipes, bindings), 1)
         ]
     passed = sum(result["ok"] is True for result in results)
-    receipt: dict[str, Any] = {
+    return {
         "schema_version": VALIDATION_SCHEMA,
-        "locations": {"cell_path": str(target)},
-        "profile": "bes",
-        "build_content_identity_sha256": build_identity,
         "cell_sha256": cell_sha256,
         "instructions_sha256": _sha256_uri(_digest_file(INSTRUCTIONS_PATH)),
-        "extracted_sql_sha256": _sha256_uri(sql_digest),
+        "recipe_sql_sha256": _sha256_uri(sql_digest),
         "query_count": len(results),
         "passed": passed,
         "failed": len(results) - passed,
         "results": results,
     }
-    identity = {key: value for key, value in receipt.items() if key != "locations"}
-    receipt["content_identity_sha256"] = _sha256_uri(
-        sha256(_canonical(identity).encode("utf-8")).hexdigest()
-    )
-    return receipt
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cell", required=True)
-    parser.add_argument("--build-receipt")
     parser.add_argument("--receipt")
     args = parser.parse_args(argv)
     if args.receipt and Path(args.receipt).resolve() == Path(args.cell).resolve():
         raise SystemExit("validation receipt path must differ from the SQLite artifact path")
-    build_receipt = (
-        json.loads(Path(args.build_receipt).read_text())
-        if args.build_receipt else None
-    )
-    receipt = validate_bes_recipes(Path(args.cell), build_receipt=build_receipt)
+    receipt = validate_bes_recipes(Path(args.cell))
     if args.receipt:
         _write_json_atomic(Path(args.receipt), receipt)
     print(json.dumps(receipt, indent=2))

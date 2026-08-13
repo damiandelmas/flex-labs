@@ -10,26 +10,22 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
-import subprocess
-import sys
 import tempfile
 from typing import Any
 from urllib.parse import urldefrag
 
 FORMAT = "xologic-native-flex/v1"
-BUILD_RECEIPT_SCHEMA = "xologic-native-flex-build/v1"
+BUILD_RECEIPT_SCHEMA = "xologic-native-flex-build/v2"
 REFRESH_MODULE = "flex.modules.xologic.compile.refresh"
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 REQUIRED_CAPTURE_ARTIFACTS = {
     "source_objects", "spec_occurrences", "relations", "asset_inventory",
 }
-MODULE_IDENTITY_PATHS = (
+TRANSFORMATION_PATHS = (
     "compile/worker.py",
-    "compile/recipes.py",
     "stock/presets/orient.sql",
     "stock/sql/lighting_projection.sql",
     "stock/sql/product_search.sql",
-    "stock/instructions.md",
 )
 
 
@@ -163,44 +159,16 @@ def _sha256_uri(digest: str) -> str:
     return digest if digest.startswith("sha256:") else "sha256:" + digest
 
 
-def _module_identity() -> dict[str, Any]:
-    file_hashes: dict[str, str] = {}
-    for relative in MODULE_IDENTITY_PATHS:
+def _transformation_hash() -> str:
+    file_hashes = {}
+    for relative in TRANSFORMATION_PATHS:
         path = MODULE_ROOT / relative
         if not path.is_file():
             raise CaptureError(f"missing XOLogic module source: {path}")
         file_hashes[relative] = _sha256_uri(_digest_file(path))
-    source_hash = _sha256_uri(
+    return _sha256_uri(
         _digest_bytes(_canonical(file_hashes).encode("utf-8"))
     )
-    git_head: str | None = None
-    git_dirty: bool | None = None
-    try:
-        repo_root = Path(subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=MODULE_ROOT,
-            check=True, capture_output=True, text=True,
-        ).stdout.strip())
-        git_head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo_root,
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        identity_paths = [
-            str((MODULE_ROOT / relative).relative_to(repo_root))
-            for relative in MODULE_IDENTITY_PATHS
-        ]
-        git_dirty = bool(subprocess.run(
-            ["git", "status", "--porcelain", "--", *identity_paths], cwd=repo_root,
-            check=True, capture_output=True, text=True,
-        ).stdout.strip())
-    except (OSError, subprocess.CalledProcessError, ValueError):
-        pass
-    return {
-        "format": FORMAT,
-        "module_git_head": git_head,
-        "module_dirty": git_dirty,
-        "module_file_hashes": file_hashes,
-        "module_source_hash": source_hash,
-    }
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
@@ -341,7 +309,7 @@ def inspect_capture(capture: Path) -> dict[str, Any]:
             "source_observations":receipt.get("artifact_counts",{}).get("source_objects")}
 
 
-def _build_database(capture: Path, output: Path, store_name: str | None) -> dict[str,Any]:
+def _build_database(capture: Path, output: Path, store_name: str | None) -> None:
     paths = _capture_paths(capture)
     receipt = _verify_receipt(paths)
     products_payload = json.loads(paths["products"].read_text())
@@ -590,13 +558,10 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> dict
             raise CaptureError(f"missing XOLogic product search projection: {search_sql}")
         db.executescript(search_sql.read_text())
         db.commit()
-        if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise CaptureError("SQLite integrity check failed")
     except Exception:
         db.close(); output.unlink(missing_ok=True); raise
     else:
         db.close()
-    return verify_cell(output)
 
 
 def verify_cell(path: Path) -> dict[str,Any]:
@@ -660,8 +625,6 @@ def verify_cell(path: Path) -> dict[str,Any]:
         expected_orient = (MODULE_ROOT / "stock" / "presets" / "orient.sql").read_text()
         if orient[0] != expected_orient:
             raise CaptureError("installed @orient differs from the authored XOLogic contract")
-        page_count = int(db.execute("PRAGMA page_count").fetchone()[0])
-        page_size = int(db.execute("PRAGMA page_size").fetchone()[0])
         return {
             **counts,
             "product_search_documents": search_document_count,
@@ -670,22 +633,15 @@ def verify_cell(path: Path) -> dict[str,Any]:
             "product_dossier_payloads": dossier_payload_count,
             "product_identifiers": product_identifier_count,
             "integrity_check":"ok",
-            "retrieval_denominator_match": True,
-            "orient_declares_enriched_surface": True,
-            "sqlite_page_count": page_count,
-            "sqlite_page_size": page_size,
             "edition_id":edition[0]["edition_id"],
-            "products_sha256": edition[0]["products_sha256"],
             "orient_sha256": _digest_bytes(orient[0].encode("utf-8")),
             "cell_sha256":_digest_file(path),
         }
 
 
-def _build_receipt(capture: Path, cell_path: Path, verification: dict[str, Any],
-                   *, store_name: str | None) -> dict[str, Any]:
+def _build_receipt(capture: Path, verification: dict[str, Any]) -> dict[str, Any]:
     paths = _capture_paths(capture)
     capture_receipt = _verify_receipt(paths)
-    module = _module_identity()
     count_names = (
         "products", "xologic_source_observations", "xologic_content_objects",
         "source_properties", "spec_occurrences", "taxonomy_paths",
@@ -694,72 +650,14 @@ def _build_receipt(capture: Path, cell_path: Path, verification: dict[str, Any],
         "product_dossier_payloads",
     )
     counts = {name: int(verification[name]) for name in count_names}
-    receipt: dict[str, Any] = {
-        "schema_version": BUILD_RECEIPT_SCHEMA,
-        "locations": {
-            "capture_path": str(paths["root"]),
-            "cell_path": str(Path(cell_path).resolve()),
-        },
-        "input": {
-            "capture_receipt_hash": capture_receipt["receipt_hash"],
-            "capture_receipt_file_sha256": _sha256_uri(_digest_file(paths["receipt"])),
-            "capture_schema_version": capture_receipt.get("schema_version"),
-            "capture_artifact_hashes": capture_receipt.get("artifact_hashes") or {},
-            "capture_artifact_counts": capture_receipt.get("artifact_counts") or {},
-            "raw_inventory_hash": capture_receipt.get("raw_inventory_hash"),
-            "raw_inventory_count": capture_receipt.get("raw_inventory_count"),
-            "factory_implementation_identities": (
-                capture_receipt.get("implementation_identities") or {}
-            ),
-            "factory_implementation_manifest_hash": (
-                capture_receipt.get("implementation_manifest_hash")
-            ),
-        },
-        "module": module,
-        "environment": {
-            "python_version": ".".join(str(value) for value in sys.version_info[:3]),
-            "sqlite_version": sqlite3.sqlite_version,
-        },
-        "output": {
-            "cell_sha256": _sha256_uri(verification["cell_sha256"]),
-            "sqlite_page_count": verification["sqlite_page_count"],
-            "sqlite_page_size": verification["sqlite_page_size"],
-            "integrity_check": verification["integrity_check"],
-            "edition_id": verification["edition_id"],
-            "products_sha256": _sha256_uri(verification["products_sha256"]),
-            "orient_sha256": _sha256_uri(verification["orient_sha256"]),
-            "store_name": store_name or "XOLogic",
-        },
-        "counts": counts,
-        "validation": {
-            "native_population_match": True,
-            "retrieval_denominator_match": verification["retrieval_denominator_match"],
-            "orient_declares_enriched_surface": (
-                verification["orient_declares_enriched_surface"]
-            ),
-        },
-    }
-    identity = {
-        "schema_version": receipt["schema_version"],
-        "input": receipt["input"],
-        "module": {
-            "format": module["format"],
-            "module_file_hashes": module["module_file_hashes"],
-            "module_source_hash": module["module_source_hash"],
-        },
-        "environment": receipt["environment"],
-        "output": receipt["output"],
-        "counts": receipt["counts"],
-        "validation": receipt["validation"],
-    }
-    receipt["content_identity_sha256"] = _sha256_uri(
-        _digest_bytes(_canonical(identity).encode("utf-8"))
-    )
     return {
-        **receipt,
-        **verification,
-        "cell": str(Path(cell_path)),
-        "atomic_replace": True,
+        "schema_version": BUILD_RECEIPT_SCHEMA,
+        "capture_receipt": capture_receipt["receipt_hash"],
+        "transformation_sha256": _transformation_hash(),
+        "cell_sha256": _sha256_uri(verification["cell_sha256"]),
+        "edition_id": verification["edition_id"],
+        "orient_sha256": _sha256_uri(verification["orient_sha256"]),
+        "counts": counts,
     }
 
 
@@ -772,11 +670,9 @@ def build_cell(capture: Path, cell_path: Path, *, store_name: str | None=None,
     try:
         staging=staging_root/(target.name+".native")
         _build_database(Path(capture),staging,store_name)
-        verify_cell(staging)
+        verification = verify_cell(staging)
         os.replace(staging,target)
-        receipt = _build_receipt(
-            Path(capture), target, verify_cell(target), store_name=store_name
-        )
+        receipt = _build_receipt(Path(capture), verification)
         if receipt_path is not None:
             _write_json_atomic(Path(receipt_path), receipt)
         return receipt

@@ -44,6 +44,6 @@ def run(args, console) -> None:
     receipt = build_cell(Path(capture), path, store_name=getattr(args, "store_name", None))
     register_cell_path(name, path, description=MODULE["description"])
     console.print(f"  cell                [bold green]{name}[/bold green]")
-    console.print(f"  products            [green]{receipt['products']}[/green]")
-    console.print(f"  source bodies       [green]{receipt['xologic_content_objects']}[/green]")
+    console.print(f"  products            [green]{receipt['counts']['products']}[/green]")
+    console.print(f"  source bodies       [green]{receipt['counts']['xologic_content_objects']}[/green]")
     console.print(f"  flex search --cell {name} \"@orient\"")

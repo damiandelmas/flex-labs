@@ -129,20 +129,20 @@ def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch
     capture = _fixture(tmp_path / "capture")
     target = tmp_path / "bes_lighting_xologic.db"
     receipt = build_cell(capture, target, store_name="BES Lighting")
-    assert receipt["atomic_replace"] is True
-    assert receipt["products"] == 1
-    assert receipt["xologic_source_observations"] == 2
-    assert receipt["xologic_content_objects"] == 1
-    assert receipt["spec_occurrences"] == 28  # every source observation remains addressable
-    assert receipt["source_properties"] == 2
-    assert receipt["taxonomy_paths"] == 2
-    assert receipt["product_links"] == 2
-    assert receipt["product_resources"] == 2
-    assert receipt["product_search_documents"] == 1
-    assert receipt["products_fts"] == 1
-    assert receipt["product_dossiers"] == 1
-    assert receipt["product_dossier_payloads"] == 1
-    assert receipt["product_identifiers"] == 3
+    counts = receipt["counts"]
+    assert counts["products"] == 1
+    assert counts["xologic_source_observations"] == 2
+    assert counts["xologic_content_objects"] == 1
+    assert counts["spec_occurrences"] == 28  # every source observation remains addressable
+    assert counts["source_properties"] == 2
+    assert counts["taxonomy_paths"] == 2
+    assert counts["product_links"] == 2
+    assert counts["product_resources"] == 2
+    assert counts["product_search_documents"] == 1
+    assert counts["products_fts"] == 1
+    assert counts["product_dossiers"] == 1
+    assert counts["product_dossier_payloads"] == 1
+    assert counts["product_identifiers"] == 3
 
     with sqlite3.connect(target) as db:
         body, digest = db.execute("SELECT body,content_hash FROM xologic_content_objects").fetchone()
@@ -354,10 +354,9 @@ def test_identical_rebuild_is_byte_stable(tmp_path):
     second = build_cell(capture, second_path, store_name="Same")
     assert first["cell_sha256"] == second["cell_sha256"]
     assert first_path.read_bytes() == second_path.read_bytes()
-    assert first["content_identity_sha256"] == second["content_identity_sha256"]
 
 
-def test_build_receipt_binds_capture_module_output_and_validation(tmp_path):
+def test_build_receipt_identifies_capture_transform_and_output(tmp_path):
     capture = _fixture(tmp_path / "capture")
     target = tmp_path / "catalogue.db"
     receipt_path = tmp_path / "catalogue.receipt.json"
@@ -365,30 +364,16 @@ def test_build_receipt_binds_capture_module_output_and_validation(tmp_path):
         capture, target, store_name="Receipt Test", receipt_path=receipt_path
     )
     assert json.loads(receipt_path.read_text()) == receipt
-    assert receipt["schema_version"] == "xologic-native-flex-build/v1"
-    assert receipt["locations"] == {
-        "capture_path": str(capture.resolve()),
-        "cell_path": str(target.resolve()),
+    assert set(receipt) == {
+        "schema_version", "capture_receipt", "transformation_sha256",
+        "cell_sha256", "edition_id", "orient_sha256", "counts",
     }
-    assert receipt["input"]["capture_receipt_hash"] == "sha256:fixture"
-    assert receipt["module"]["module_source_hash"].startswith("sha256:")
-    assert set(receipt["module"]["module_file_hashes"]) == {
-        "compile/worker.py", "compile/recipes.py", "stock/presets/orient.sql",
-        "stock/sql/lighting_projection.sql", "stock/sql/product_search.sql",
-        "stock/instructions.md",
-    }
-    assert receipt["output"]["cell_sha256"] == "sha256:" + _sha(target)
-    assert receipt["output"]["products_sha256"].startswith("sha256:")
-    assert receipt["output"]["orient_sha256"].startswith("sha256:")
-    assert receipt["environment"]["python_version"]
-    assert receipt["environment"]["sqlite_version"]
+    assert receipt["schema_version"] == "xologic-native-flex-build/v2"
+    assert receipt["capture_receipt"] == "sha256:fixture"
+    assert receipt["transformation_sha256"].startswith("sha256:")
+    assert receipt["cell_sha256"] == "sha256:" + _sha(target)
+    assert receipt["orient_sha256"].startswith("sha256:")
     assert receipt["counts"]["products"] == 1
-    assert receipt["validation"] == {
-        "native_population_match": True,
-        "retrieval_denominator_match": True,
-        "orient_declares_enriched_surface": True,
-    }
-    assert receipt["content_identity_sha256"].startswith("sha256:")
     with pytest.raises(CaptureError, match="must differ"):
         build_cell(capture, target, receipt_path=target)
 
@@ -516,7 +501,7 @@ def test_source_only_promotion_does_not_borrow_shared_content_properties(tmp_pat
 
     target = tmp_path / "catalogue.db"
     receipt = build_cell(capture, target)
-    assert receipt["products"] == 2
+    assert receipt["counts"]["products"] == 2
     with sqlite3.connect(target) as db:
         assert db.execute(
             "SELECT count(*) FROM products WHERE url=?", (named_url,)
@@ -574,7 +559,7 @@ def test_source_only_option_sku_is_promoted_without_python_normalization(tmp_pat
 
     target = tmp_path / "catalogue.db"
     receipt = build_cell(capture, target)
-    assert receipt["products"] == 2
+    assert receipt["counts"]["products"] == 2
     with sqlite3.connect(target) as db:
         projection, sku = db.execute(
             "SELECT json_extract(product_json,'$.source_projection'),sku "

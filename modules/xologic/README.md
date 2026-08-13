@@ -14,15 +14,14 @@ python -m modules.xologic.compile.worker \
   --receipt /isolated/path/store_xologic.receipt.json
 ```
 
-The receipt binds the sealed capture, exact module sources, Python/SQLite
-environment, product fingerprint, installed `@orient`, relation populations,
-and final SQLite identity. The BES acceptance profile executes the fifteen SQL
-recipes directly against that artifact and writes a linked validation receipt:
+The compact receipt identifies the sealed capture, transformation bytes, final
+SQLite, installed `@orient`, and relation populations. BES has an optional
+acceptance command that executes its fifteen authored SQL recipes directly
+against an artifact:
 
 ```bash
 python -m modules.xologic.compile.recipes \
   --cell /isolated/path/store_xologic.db \
-  --build-receipt /isolated/path/store_xologic.receipt.json \
   --receipt /isolated/path/store_xologic.recipes.json
 ```
 
