@@ -62,6 +62,12 @@ larger set of partial rows. Flex gates ordinary results above roughly 35000
 characters, so crossing this boundary returns a window envelope rather than
 product rows.
 
+Every product batch should expose `total_matches`, `returned`, and `has_more`.
+Compute `total_matches` from the complete ranked population before product and
+character limits, compute `returned` from the final batch, and set `has_more`
+when the former exceeds the latter. This distinguishes an exhausted result set
+from an intentionally bounded batch and supports a faithful “show me more” turn.
+
 Construct an FTS expression from useful natural-language search terms rather
 than passing the customer's sentence through as query syntax. Do not use FTS
 for a SKU, part number, GTIN, or handle: query `product_identifiers` by its
@@ -131,7 +137,10 @@ WITH wanted AS (
   FROM ranked x
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized x
 JOIN product_dossiers dossier USING(product_ref)
 WHERE x.batch_rank<=5
@@ -181,7 +190,10 @@ WITH discovered AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -244,7 +256,10 @@ WITH discovered AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -307,7 +322,10 @@ WITH discovered AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -376,7 +394,10 @@ WITH discovered AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -433,7 +454,10 @@ WITH discovered AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -477,7 +501,7 @@ WITH eligible AS (
         )
     )
 ), ranked AS (
-  SELECT e.*,count(*) OVER () AS total_matches,
+  SELECT e.*,
          row_number() OVER (
            ORDER BY e.price_min,e.title,e.product_ref
          ) AS batch_rank
@@ -490,7 +514,10 @@ WITH eligible AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT e.total_matches,dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -498,7 +525,7 @@ WHERE e.batch_rank<=5
 ORDER BY e.batch_rank;
 ```
 
-The window count describes all eligible products, not merely the returned page.
+The total describes all eligible products, not merely the returned page.
 The dossier and character limits affect presentation only. Changing a filter
 requires recomputing both the total and the displayed batch.
 
@@ -540,7 +567,10 @@ WITH eligible AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -613,7 +643,10 @@ WITH candidates AS (
   FROM ranked r
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT r.match_class,dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       r.match_class,dossier.*
 FROM sized r
 JOIN product_dossiers dossier USING(product_ref)
 WHERE r.batch_rank<=5
@@ -661,7 +694,10 @@ WITH selected AS (
   FROM ranked x
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized x
 JOIN product_dossiers dossier USING(product_ref)
 WHERE x.batch_rank<=5
@@ -699,7 +735,10 @@ WITH requested AS (
   FROM ranked r
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized r
 JOIN product_dossiers dossier USING(product_ref)
 WHERE r.batch_rank<=5
@@ -764,7 +803,10 @@ WITH eligible AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT e.evidence_coverage,e.consequential_conflicts,dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       e.evidence_coverage,e.consequential_conflicts,dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -841,7 +883,10 @@ WITH title_lane AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT e.supporting_searches,dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       e.supporting_searches,dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
@@ -911,7 +956,10 @@ WITH family_map AS (
   FROM ranked r
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized r
 JOIN product_dossiers dossier USING(product_ref)
 WHERE r.batch_rank<=5
@@ -980,7 +1028,10 @@ WITH shown AS (
   FROM ranked e
   JOIN product_dossier_payloads payload USING(product_ref)
 )
-SELECT dossier.*
+SELECT (SELECT count(*) FROM ranked) AS total_matches,
+       count(*) OVER () AS returned,
+       (SELECT count(*) FROM ranked)>count(*) OVER () AS has_more,
+       dossier.*
 FROM sized e
 JOIN product_dossiers dossier USING(product_ref)
 WHERE e.batch_rank<=5
