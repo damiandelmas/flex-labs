@@ -1201,8 +1201,8 @@ def _module_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _lighting_profile_root() -> Path:
-    return _module_root() / "profiles" / "lighting"
+def _lighting_root() -> Path:
+    return _module_root() / "lighting"
 
 
 def _set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
@@ -1212,9 +1212,8 @@ def _set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
-def install_stock_assets(db: sqlite3.Connection) -> None:
-    """Install provider-common and WooCommerce-lighting saved queries."""
-    root = _module_root()
+def install_lighting_assets(db: sqlite3.Connection) -> None:
+    """Install the WooCommerce-lighting saved queries."""
     from flex.retrieve.presets import install_presets
 
     # The direct module is intended to run against the installed Flex service
@@ -1225,23 +1224,14 @@ def install_stock_assets(db: sqlite3.Connection) -> None:
         if "record_operation" in inspect.signature(install_presets).parameters
         else {}
     )
-    for presets_dir in (
-        root / "stock" / "presets",
-        _lighting_profile_root() / "stock" / "presets",
-    ):
-        if not presets_dir.exists():
-            continue
-        install_presets(db, presets_dir, **kwargs)
+    install_presets(db, _lighting_root() / "presets", **kwargs)
 
 
 def install_query_projection(db: sqlite3.Connection) -> None:
     """Build the WooCommerce-lighting views and text index with SQL."""
-    root = _module_root()
-    profile = _lighting_profile_root()
     for sql_path in (
-        root / "stock" / "views" / "catalogue.sql",
-        profile / "stock" / "sql" / "lighting_projection.sql",
-        profile / "stock" / "sql" / "product_search.sql",
+        _lighting_root() / "sql" / "catalogue.sql",
+        _lighting_root() / "sql" / "product_search.sql",
     ):
         db.executescript(sql_path.read_text(encoding="utf-8"))
 
@@ -1262,7 +1252,7 @@ def finalize_native_cell(
     verify_staging_sqlite(target)
     with sqlite3.connect(target) as db:
         db.row_factory = sqlite3.Row
-        install_stock_assets(db)
+        install_lighting_assets(db)
         _set_meta(db, "cell_type", "woocommerce")
         # This is a native relational catalogue queried directly with SQL. It has no
         # generic text corpus or embedding contract, so explicitly prevent Flex from

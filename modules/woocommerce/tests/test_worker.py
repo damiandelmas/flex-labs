@@ -530,9 +530,9 @@ def test_native_verifier_rejects_derived_coverage_drift(tmp_path, monkeypatch):
 
 def test_authored_query_contract_has_fifteen_recipes_and_orient_has_none():
     module_root = Path(__file__).resolve().parents[1]
-    profile_stock = module_root / "profiles" / "lighting" / "stock"
-    instructions = (profile_stock / "instructions.md").read_text()
-    orient = (profile_stock / "presets" / "orient.sql").read_text()
+    lighting = module_root / "lighting"
+    instructions = (lighting / "instructions.md").read_text()
+    orient = (lighting / "presets" / "orient.sql").read_text()
 
     assert sum(1 for line in instructions.splitlines() if line.startswith("## ") and line[3:4].isdigit()) == 15
     assert "product_identifiers" in instructions
@@ -541,4 +541,8 @@ def test_authored_query_contract_has_fifteen_recipes_and_orient_has_none():
     assert "product_dossier_payloads" in instructions
     assert "-- @query: examples" not in orient
     assert "-- @query: cell_docs" not in orient
+    assert (lighting / "sql" / "catalogue.sql").exists()
+    assert (lighting / "sql" / "product_search.sql").exists()
     assert not (module_root / "stock" / "instructions.md").exists()
+    assert not (module_root / "stock").exists()
+    assert not (module_root / "profiles").exists()
