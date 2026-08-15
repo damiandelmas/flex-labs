@@ -2,23 +2,22 @@
 
 WooCommerce is a public no-auth source module for the Store API product
 catalogue. It captures exact `/wp-json/wc/store/v1/products` response bytes,
-stores them in raw SQLite tables, then applies the `lighting` profile in that
-same cell. Native evidence remains authoritative; every search or dossier
-surface is deterministic and rebuildable.
+stores them in raw SQLite tables, then installs the one WooCommerce-lighting SQL
+contract in that same cell. Native evidence remains authoritative; every search
+or dossier surface is deterministic and rebuildable.
 
 The boundaries are explicit:
 
 ```text
 compile/                              Store API -> source-faithful SQLite
-stock/                                provider-common WooCommerce views/presets
-profiles/lighting/stock/sql/          lighting projections and search surfaces
-profiles/lighting/stock/presets/      the WooCommerce-lighting @orient
-profiles/lighting/stock/instructions.md  the WooCommerce-lighting query method
+lighting/sql/catalogue.sql            catalogue views and lighting projections
+lighting/sql/product_search.sql       search tables, FTS, dossiers, payloads
+lighting/presets/                     WooCommerce-lighting saved queries
+lighting/instructions.md              WooCommerce-lighting query method
 ```
 
-There is no generic commerce instruction contract. `woocommerce-lighting` is
-the only implemented profile; another profile should be added only for a real
-non-lighting consumer.
+There is no generic commerce instruction contract or dynamic product-family
+selection. `woocommerce-lighting` is the only implemented product contract.
 
 ## Install
 
@@ -55,8 +54,8 @@ results in `product_dossiers` plus `product_dossier_payloads`. Raw
 
 `@orient` is the live map of the store, its public relations, and the evidence
 boundary behind them. It contains no worked SQL or response behavior. The
-profile's `profiles/lighting/stock/instructions.md` owns the WooCommerce-lighting
-retrieval method and its worked query recipes.
+`lighting/instructions.md` file owns the WooCommerce-lighting retrieval method
+and its worked query recipes.
 
 Price exposure follows `price_visibility`. Stock, in-stock, backorder, and
 purchasability remain separate fields. Multi-valued attributes/options and
