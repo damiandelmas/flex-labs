@@ -15,12 +15,16 @@ from typing import Any
 from urllib.parse import urldefrag
 
 FORMAT = "xologic-native-flex/v1"
-BUILD_RECEIPT_SCHEMA = "xologic-native-flex-build/v2"
+BUILD_RECEIPT_SCHEMA = "xologic-native-flex-build/v3"
 REFRESH_MODULE = "flex.modules.xologic.compile.refresh"
 MODULE_ROOT = Path(__file__).resolve().parent.parent
+SUPPORTED_EVIDENCE_SCHEMAS = frozenset({
+    "xologic-lossless/v1", "xologic-lossless/v2",
+})
 REQUIRED_CAPTURE_ARTIFACTS = {
     "source_objects", "spec_occurrences", "relations", "asset_inventory",
 }
+INSTRUCTIONS_PATH = MODULE_ROOT / "stock" / "instructions.md"
 TRANSFORMATION_PATHS = (
     "compile/worker.py",
     "stock/presets/orient.sql",
@@ -34,15 +38,12 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE xologic_editions(
   edition_id TEXT PRIMARY KEY, capture_path TEXT NOT NULL, store_name TEXT,
   evidence_receipt TEXT NOT NULL, products_sha256 TEXT NOT NULL,
-  product_count INTEGER NOT NULL, source_observation_count INTEGER NOT NULL
-);
-CREATE TABLE xologic_content_objects(
-  content_hash TEXT PRIMARY KEY, mime_type TEXT NOT NULL, byte_count INTEGER NOT NULL,
-  body BLOB NOT NULL CHECK(length(body)=byte_count)
+  product_count INTEGER NOT NULL, source_observation_count INTEGER NOT NULL,
+  evidence_schema_version TEXT NOT NULL
 );
 CREATE TABLE xologic_source_observations(
   source_id TEXT PRIMARY KEY, edition_id TEXT NOT NULL REFERENCES xologic_editions,
-  content_hash TEXT NOT NULL REFERENCES xologic_content_objects,
+  content_hash TEXT NOT NULL,
   source_namespace TEXT, object_kind TEXT, identity_key TEXT,
   requested_url TEXT NOT NULL, fetch_url TEXT, final_url TEXT, status INTEGER,
   parser_identity TEXT, config_identity TEXT, code_identity TEXT,
@@ -50,9 +51,10 @@ CREATE TABLE xologic_source_observations(
 );
 CREATE TABLE products(
   product_ref TEXT PRIMARY KEY, edition_id TEXT NOT NULL REFERENCES xologic_editions,
-  source_order INTEGER NOT NULL, url TEXT NOT NULL UNIQUE, handle TEXT,
+  source_order INTEGER NOT NULL, url TEXT NOT NULL, handle TEXT,
   sku TEXT, partnumber TEXT, gtin TEXT, title TEXT NOT NULL, vendor TEXT,
   vendor_id TEXT, price TEXT, image_url TEXT, body_html TEXT,
+  source_id TEXT, requested_url TEXT, product_key TEXT,
   product_json TEXT NOT NULL
 );
 CREATE TABLE product_source_observations(
@@ -62,19 +64,19 @@ CREATE TABLE product_source_observations(
 CREATE TABLE source_properties(
   property_id TEXT PRIMARY KEY,
   source_id TEXT NOT NULL REFERENCES xologic_source_observations,
-  content_hash TEXT NOT NULL REFERENCES xologic_content_objects,
+  content_hash TEXT NOT NULL,
   source_order INTEGER NOT NULL, tag TEXT, property_attribute TEXT,
-  property TEXT, value_attribute TEXT, value TEXT, locator TEXT,
-  attributes_json TEXT, raw_start_tag TEXT
+  property TEXT, value_attribute TEXT, value TEXT, locator TEXT
 );
 CREATE TABLE spec_occurrences(
   occurrence_id TEXT PRIMARY KEY, product_ref TEXT REFERENCES products,
   source_id TEXT NOT NULL REFERENCES xologic_source_observations,
-  content_hash TEXT NOT NULL REFERENCES xologic_content_objects,
-  source_layer TEXT, source_order INTEGER NOT NULL, surface_ordinal INTEGER,
+  content_hash TEXT NOT NULL,
+  source_namespace TEXT, object_kind TEXT, source_layer TEXT,
+  section_heading TEXT, source_order INTEGER NOT NULL, surface_ordinal INTEGER,
   label TEXT NOT NULL, value TEXT NOT NULL, locator TEXT,
   raw_label TEXT, raw_value TEXT, row_classes TEXT,
-  visible INTEGER, visibility_json TEXT
+  visible INTEGER, visibility_json TEXT NOT NULL
 );
 CREATE TABLE taxonomy_paths(
   product_ref TEXT NOT NULL REFERENCES products, depth INTEGER NOT NULL, label TEXT NOT NULL,
@@ -83,19 +85,23 @@ CREATE TABLE taxonomy_paths(
 CREATE TABLE product_links(
   link_id TEXT PRIMARY KEY, product_ref TEXT REFERENCES products,
   source_id TEXT NOT NULL REFERENCES xologic_source_observations,
-  content_hash TEXT REFERENCES xologic_content_objects, kind TEXT NOT NULL,
+  content_hash TEXT, kind TEXT NOT NULL,
   url TEXT NOT NULL, locator TEXT, scope TEXT, raw_href TEXT,
-  target_id TEXT, target_source_id TEXT, target_object_kind TEXT
+  target_id TEXT, target_source_id TEXT, target_namespace TEXT,
+  target_object_kind TEXT, source_namespace TEXT, source_object_kind TEXT,
+  surface_ordinal INTEGER, tag TEXT, visible_text TEXT, section_heading TEXT,
+  fragment_meaningful INTEGER
 );
 CREATE TABLE product_resources(
   resource_id TEXT PRIMARY KEY, product_ref TEXT REFERENCES products,
   source_id TEXT NOT NULL REFERENCES xologic_source_observations,
-  content_hash TEXT REFERENCES xologic_content_objects, kind TEXT NOT NULL,
+  content_hash TEXT, kind TEXT NOT NULL,
   url TEXT NOT NULL, asset_id TEXT, raw_href TEXT, locator TEXT,
-  locators_json TEXT NOT NULL, scope TEXT
+  locators_json TEXT NOT NULL, scope TEXT, surface_ordinal INTEGER,
+  tag TEXT, visible_text TEXT, section_heading TEXT
 );
 CREATE INDEX ix_source_requested ON xologic_source_observations(requested_url);
-CREATE INDEX ix_source_content ON xologic_source_observations(content_hash);
+CREATE INDEX ix_products_identity ON products(product_key,source_id,requested_url);
 CREATE INDEX ix_spec_lookup ON spec_occurrences(label,value,product_ref);
 CREATE INDEX ix_spec_product ON spec_occurrences(product_ref,label,source_order);
 CREATE INDEX ix_taxonomy_lookup ON taxonomy_paths(label,depth,product_ref);
@@ -132,6 +138,58 @@ SELECT p.*,
        COALESCE((SELECT json_group_object(label,value) FROM preferred_spec_occurrences s
                  WHERE s.product_ref=p.product_ref),'{}') AS preferred_specs_json
 FROM products p;
+
+CREATE VIEW product_specification AS
+SELECT occurrence_id,product_ref,source_id,source_order,surface_ordinal,
+       label,value,raw_label,raw_value,locator,row_classes,visible,visibility_json
+FROM spec_occurrences
+WHERE section_heading='Product Specification'
+   OR source_layer='product_specification';
+
+CREATE VIEW additional_product_details AS
+SELECT occurrence_id,product_ref,source_id,source_layer,source_order,surface_ordinal,
+       label,value,raw_label,raw_value,locator,row_classes,visible,visibility_json
+FROM spec_occurrences
+WHERE section_heading='Additional product details'
+   OR source_layer IN ('standardData','additionalData');
+
+CREATE VIEW other_details AS
+SELECT occurrence_id,product_ref,source_id,source_order,surface_ordinal,
+       label,value,raw_label,raw_value,locator,row_classes,visible,visibility_json
+FROM spec_occurrences
+WHERE section_heading='Other Details' OR source_layer='other_details';
+
+CREATE VIEW images AS
+SELECT link_id AS relation_id,product_ref,source_id,surface_ordinal,
+       visible_text,url,raw_href,locator,tag,section_heading,scope
+FROM product_links WHERE kind='image_for';
+
+CREATE VIEW downloads AS
+SELECT link_id AS relation_id,product_ref,source_id,surface_ordinal,
+       visible_text,url,raw_href,locator,tag,section_heading,scope
+FROM product_links WHERE kind='document_for';
+
+CREATE VIEW options AS
+SELECT link_id AS relation_id,product_ref,source_id,surface_ordinal,
+       visible_text,url,raw_href,locator,tag,section_heading,
+       fragment_meaningful,target_id,target_source_id
+FROM product_links WHERE kind='option_for';
+
+CREATE VIEW additional_options_that_would_change_other_selections AS
+SELECT * FROM options
+WHERE section_heading='Additional options that would change other selections';
+
+CREATE VIEW collection_products AS
+SELECT link_id AS relation_id,product_ref,source_id,surface_ordinal,
+       visible_text,url,raw_href,locator,tag,target_id,target_source_id
+FROM product_links
+WHERE kind='product_link' AND section_heading='More In This Collection';
+
+CREATE VIEW related_products AS
+SELECT link_id AS relation_id,product_ref,source_id,surface_ordinal,
+       visible_text,url,raw_href,locator,tag,target_id,target_source_id
+FROM product_links
+WHERE kind='product_link' AND section_heading='Related Products';
 """
 
 
@@ -217,7 +275,7 @@ def _capture_paths(capture: Path) -> dict[str, Path]:
 
 def _verify_receipt(paths: dict[str, Path]) -> dict[str, Any]:
     receipt = json.loads(paths["receipt"].read_text())
-    if (receipt.get("schema_version") != "xologic-lossless/v1"
+    if (receipt.get("schema_version") not in SUPPORTED_EVIDENCE_SCHEMAS
             or receipt.get("complete") is not True
             or receipt.get("sealed") is not True):
         raise CaptureError("XOLogic evidence receipt is not sealed and complete")
@@ -237,11 +295,20 @@ def _verify_receipt(paths: dict[str, Path]) -> dict[str, Any]:
     return receipt
 
 
+def _unique_evidence_ids(rows: list[dict[str, Any]], field: str,
+                         artifact: str) -> None:
+    values = [row.get(field) for row in rows]
+    if any(not isinstance(value, str) or not value for value in values):
+        raise CaptureError(f"{artifact} lacks exact {field} values")
+    if len(values) != len(set(values)):
+        raise CaptureError(f"{artifact} contains duplicate {field} values")
+
+
 def _product_ref(product: dict[str, Any]) -> str:
-    url = product.get("url")
-    if not isinstance(url,str) or not url:
+    identity = product.get("source_id") or product.get("requested_url") or product.get("url")
+    if not isinstance(identity,str) or not identity:
         raise CaptureError("product has no URL")
-    return _stable_id("product", url)
+    return _stable_id("product", identity)
 
 
 def _price(product: dict[str, Any]) -> str | None:
@@ -257,22 +324,43 @@ def _price(product: dict[str, Any]) -> str | None:
 def _url_index(products: list[dict[str, Any]]) -> tuple[dict[str,str],dict[str,str]]:
     exact: dict[str,str] = {}
     base: dict[str,str] = {}
-    ambiguous: set[str] = set()
+    exact_ambiguous: set[str] = set()
+    base_ambiguous: set[str] = set()
     for product in products:
         ref = _product_ref(product)
-        url = str(product["url"])
-        exact[url] = ref
-        key = urldefrag(url)[0]
-        if key in base and base[key] != ref:
-            ambiguous.add(key)
-        else:
-            base[key] = ref
-    for key in ambiguous:
+        aliases = {
+            str(value) for value in (product.get("url"), product.get("requested_url"))
+            if isinstance(value, str) and value
+        }
+        aliases.update(
+            str(alias.get(field))
+            for alias in (product.get("source_aliases") or [])
+            if isinstance(alias, dict)
+            for field in ("requested_url", "final_url")
+            if isinstance(alias.get(field), str) and alias.get(field)
+        )
+        for url in aliases:
+            if url in exact and exact[url] != ref:
+                exact_ambiguous.add(url)
+            else:
+                exact[url] = ref
+            key = urldefrag(url)[0]
+            if key in base and base[key] != ref:
+                base_ambiguous.add(key)
+            else:
+                base[key] = ref
+    for key in exact_ambiguous:
+        exact.pop(key,None)
+    for key in base_ambiguous:
         base.pop(key,None)
     return exact,base
 
 
-def _map_source(row: dict[str,Any], exact: dict[str,str], base: dict[str,str]) -> str | None:
+def _map_source(row: dict[str,Any], exact: dict[str,str], base: dict[str,str],
+                source_refs: dict[str,str] | None = None) -> str | None:
+    source_id = row.get("source_id")
+    if source_refs and isinstance(source_id, str) and source_id in source_refs:
+        return source_refs[source_id]
     for field in ("requested_url","fetch_url","final_url"):
         value = row.get(field)
         if isinstance(value,str) and value in exact:
@@ -312,6 +400,7 @@ def inspect_capture(capture: Path) -> dict[str, Any]:
 def _build_database(capture: Path, output: Path, store_name: str | None) -> None:
     paths = _capture_paths(capture)
     receipt = _verify_receipt(paths)
+    evidence_schema = str(receipt["schema_version"])
     products_payload = json.loads(paths["products"].read_text())
     products = products_payload.get("products")
     if not isinstance(products,list) or any(not isinstance(p,dict) for p in products):
@@ -330,6 +419,11 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
         expected = (receipt.get("artifact_counts") or {}).get(artifact)
         if expected is None or len(rows) != int(expected):
             raise CaptureError(f"evidence artifact count mismatch: {artifact}")
+    _unique_evidence_ids(source_rows, "source_id", "source_objects")
+    _unique_evidence_ids(asset_rows, "asset_id", "asset_inventory")
+    if evidence_schema == "xologic-lossless/v2":
+        _unique_evidence_ids(occurrence_rows, "occurrence_id", "spec_occurrences")
+        _unique_evidence_ids(relation_rows, "relation_id", "relations")
     source_ids = {str(row.get("source_id")) for row in source_rows if row.get("source_id")}
     expected_counts = {
         "source_properties": sum(len(row.get("structured_properties") or []) for row in source_rows),
@@ -349,6 +443,22 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
     receipt_id = str(receipt.get("receipt_hash") or "sha256:" + _digest_file(paths["receipt"]))
     edition_id = _stable_id("edition",products_sha,receipt_id)
     exact_urls,base_urls = _url_index(products)
+    source_refs = {
+        str(product["source_id"]): _product_ref(product)
+        for product in products
+        if isinstance(product.get("source_id"), str) and product.get("source_id")
+    }
+    for product in products:
+        ref = _product_ref(product)
+        for alias in product.get("source_aliases") or []:
+            if isinstance(alias, dict) and isinstance(alias.get("source_id"), str):
+                prior = source_refs.setdefault(str(alias["source_id"]), ref)
+                if prior != ref:
+                    raise CaptureError("one source identity maps to multiple product rows")
+    provider_keys_by_source_id = {
+        str(row["source_id"]): row.get("provider_keys") or {}
+        for row in source_rows
+    }
 
     db = sqlite3.connect(output)
     try:
@@ -357,14 +467,16 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
         from flex.envelope import install_cell_core
         install_cell_core(db)
         db.executescript(SCHEMA)
-        db.execute("INSERT INTO xologic_editions VALUES(?,?,?,?,?,?,?)",
-                   (edition_id,str(paths["root"]),store_name,receipt_id,products_sha,len(products),len(source_rows)))
+        db.execute("INSERT INTO xologic_editions VALUES(?,?,?,?,?,?,?,?)",
+                   (edition_id,str(paths["root"]),store_name,receipt_id,products_sha,
+                    len(products),len(source_rows),evidence_schema))
         metadata = {
             "cell_type":"xologic","provider":"xologic",
             "profile":"commerce-native","schema_version":FORMAT,
             "description":f"{store_name or 'XOLogic'} source-faithful native catalogue",
             "capture_path":str(paths["root"]),"store_name":store_name or "XOLogic",
             "evidence_receipt":receipt_id,"products_sha256":products_sha,
+            "evidence_schema_version": evidence_schema,
             **{f"expected_{key}": str(value) for key,value in expected_counts.items()},
             "lifecycle":"refresh","refresh_module":REFRESH_MODULE,
             "authority":"provider-native-capture",
@@ -393,17 +505,19 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
             title = product.get("title")
             if not isinstance(url,str) or not isinstance(title,str):
                 raise CaptureError(f"product {order} lacks URL/title")
-            db.execute("""INSERT INTO products VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            db.execute("""INSERT INTO products VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (ref,edition_id,order,url,product.get("handle"),product.get("sku"),
                  product.get("partnumber"),product.get("gtin"),title,product.get("vendor"),
                  None if product.get("vendor_id") is None else str(product.get("vendor_id")),
-                 _price(product),product.get("image"),product.get("body_html"),_canonical(product)))
+                 _price(product),product.get("image"),product.get("body_html"),
+                 product.get("source_id"),product.get("requested_url"),
+                 product.get("product_key"),_canonical(product)))
             for depth,label in enumerate(product.get("tags") or [],1):
                 db.execute("INSERT OR IGNORE INTO taxonomy_paths VALUES(?,?,?)",(ref,depth,str(label)))
 
         source_hash: dict[str,str] = {}
         source_product: dict[str,str|None] = {}
-        bodies: dict[str,bytes] = {}
+        verified_bodies: set[str] = set()
         root = paths["root"]
         for row in source_rows:
             source_id = row.get("source_id")
@@ -417,16 +531,13 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
             raw_path = (root / relative).resolve()
             if not raw_path.is_relative_to(root) or not raw_path.is_file():
                 raise CaptureError(f"source body escapes capture or is missing: {relative}")
-            body = bodies.get(expected)
-            if body is None:
+            if expected not in verified_bodies:
                 body = raw_path.read_bytes()
                 if _digest_bytes(body) != expected or (descriptor.get("bytes") is not None and len(body)!=int(descriptor["bytes"])):
                     raise CaptureError(f"source body hash/size mismatch: {relative}")
-                bodies[expected]=body
-                db.execute("INSERT INTO xologic_content_objects VALUES(?,?,?,?)",
-                           (expected,"text/html",len(body),body))
+                verified_bodies.add(expected)
             source_hash[source_id]=expected
-            mapped=_map_source(row,exact_urls,base_urls)
+            mapped=_map_source(row,exact_urls,base_urls,source_refs)
             source_product[source_id]=mapped
             db.execute("""INSERT INTO xologic_source_observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (source_id,edition_id,expected,row.get("source_namespace"),row.get("object_kind"),
@@ -439,10 +550,9 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
                 values=(source_id,expected,prop.get("surface_ordinal"),prop.get("tag"),prop.get("property_attribute"),
                         prop.get("property"),prop.get("value_attribute"),prop.get("value"),prop.get("locator"))
                 pid=_stable_id("property",*values)
-                db.execute("INSERT OR IGNORE INTO source_properties VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT OR IGNORE INTO source_properties VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (pid,source_id,expected,int(prop.get("surface_ordinal") or 0),prop.get("tag"),prop.get("property_attribute"),
-                     prop.get("property"),prop.get("value_attribute"),prop.get("value"),prop.get("locator"),
-                     _canonical(prop.get("attributes") or {}),prop.get("raw_start_tag")))
+                     prop.get("property"),prop.get("value_attribute"),prop.get("value"),prop.get("locator")))
 
         # products.json is an older compatibility frontier. XOLogic option links
         # can expose additional live SKU PDPs, so promote every source-backed
@@ -470,31 +580,41 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
                 ON p.source_id=s.source_id AND p.content_hash=s.content_hash
               GROUP BY s.source_id
             )
-            SELECT r.final_url,p.name,p.sku,p.mpn,p.gtin,p.price,p.image,p.description
+            SELECT r.source_id,r.requested_url,r.final_url,
+                   p.name,p.sku,p.mpn,p.gtin,p.price,p.image,p.description
             FROM ranked r JOIN props p USING(source_id)
             WHERE r.source_rank=1 AND p.name IS NOT NULL
               AND NOT EXISTS(SELECT 1 FROM products x WHERE x.url=r.final_url)
             ORDER BY r.final_url
         """).fetchall()
         next_order = int(db.execute("SELECT COALESCE(max(source_order),0) FROM products").fetchone()[0])
-        for offset,(url,name,sku,mpn,gtin,price,image,description) in enumerate(additions,1):
+        for offset,(source_id,requested_url,url,name,sku,mpn,gtin,
+                   price,image,description) in enumerate(additions,1):
+            provider_keys = provider_keys_by_source_id.get(str(source_id), {})
             projected = {"url":url,"title":name,"sku":sku,"partnumber":mpn or sku,
                          "gtin":gtin,"variants":[{"price":price}] if price is not None else [],
-                         "image":image,"body_html":description,"source_projection":"xologic-rdfa"}
-            db.execute("INSERT INTO products VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (_stable_id("product",url),edition_id,next_order+offset,url,url,sku,mpn or sku,gtin,
-                 name,None,None,price,image,description,_canonical(projected)))
+                         "image":image,"body_html":description,"source_projection":"xologic-rdfa",
+                         "source_id":source_id,"requested_url":requested_url,
+                         "product_key":provider_keys.get("product_key")}
+            db.execute("INSERT INTO products VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (_stable_id("product",source_id),edition_id,next_order+offset,url,url,sku,mpn or sku,gtin,
+                 name,provider_keys.get("vendor"),None,price,image,description,source_id,
+                 requested_url,provider_keys.get("product_key"),_canonical(projected)))
 
-        product_pairs=db.execute("SELECT url,product_ref FROM products").fetchall()
-        exact_urls={url:ref for url,ref in product_pairs}
-        base_urls={}
-        ambiguous=set()
-        for url,ref in product_pairs:
-            key=urldefrag(url)[0]
-            if key in base_urls and base_urls[key]!=ref: ambiguous.add(key)
-            else: base_urls[key]=ref
-        for key in ambiguous: base_urls.pop(key,None)
-        source_product={str(row["source_id"]):_map_source(row,exact_urls,base_urls) for row in source_rows}
+        product_rows = [json.loads(row[0]) for row in db.execute(
+            "SELECT product_json FROM products ORDER BY source_order,product_ref"
+        )]
+        exact_urls,base_urls = _url_index(product_rows)
+        source_refs = {
+            str(source_id): str(product_ref)
+            for source_id,product_ref in db.execute(
+                "SELECT source_id,product_ref FROM products WHERE source_id IS NOT NULL"
+            )
+        }
+        source_product={
+            str(row["source_id"]):_map_source(row,exact_urls,base_urls,source_refs)
+            for row in source_rows
+        }
         for source_id,product_ref in source_product.items():
             if product_ref:
                 db.execute("INSERT OR IGNORE INTO product_source_observations VALUES(?,?)",(product_ref,source_id))
@@ -509,21 +629,30 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
             if label is None or value is None: raise CaptureError("occurrence lacks label/value")
             signature=(str(sid),source_product.get(str(sid)),content,row.get("source_layer"),row.get("source_order"),
                        row.get("surface_ordinal"),str(label),str(value),row.get("locator"),row.get("raw_label"),row.get("raw_value"))
-            oid=_stable_id("occurrence",*signature)
+            oid=row.get("occurrence_id") or _stable_id("occurrence",*signature)
             visible=(row.get("visibility_evidence") or {}).get("hidden") is False
-            db.execute("INSERT OR IGNORE INTO spec_occurrences VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (oid,source_product.get(str(sid)),str(sid),content,row.get("source_layer"),int(row.get("source_order") or 0),
-                 row.get("surface_ordinal"),str(label),str(value),row.get("locator"),row.get("raw_label"),row.get("raw_value"),
-                 row.get("row_classes"),int(visible),_canonical(row.get("visibility_evidence") or {})))
+            db.execute("INSERT INTO spec_occurrences VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (oid,source_product.get(str(sid)),str(sid),content,
+                 row.get("source_namespace"),row.get("object_kind"),row.get("source_layer"),
+                 row.get("section_heading"),int(row.get("source_order") or 0),
+                 row.get("surface_ordinal"),str(label),str(value),row.get("locator"),
+                 row.get("raw_label"),row.get("raw_value"),row.get("row_classes"),
+                 int(visible),_canonical(row.get("visibility_evidence") or {})))
 
         for row in relation_rows:
             sid=str(row.get("source_id") or ""); content=source_hash.get(sid); url=row.get("target_url")
             if not content or not isinstance(url,str) or not url: continue
             product_ref=source_product.get(sid)
             signature=(sid,product_ref,content,row.get("kind"),url,row.get("locator"),row.get("scope"),row.get("target_id"))
-            db.execute("INSERT OR IGNORE INTO product_links VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (_stable_id("link",*signature),product_ref,sid,content,str(row.get("kind") or "link"),url,row.get("locator"),
-                 row.get("scope"),row.get("raw_href"),row.get("target_id"),row.get("target_source_id"),row.get("target_object_kind")))
+            db.execute("INSERT INTO product_links VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row.get("relation_id") or _stable_id("link",*signature),product_ref,sid,content,
+                 str(row.get("kind") or "link"),url,row.get("locator"),row.get("scope"),
+                 row.get("raw_href"),row.get("target_id"),row.get("target_source_id"),
+                 row.get("target_namespace"),row.get("target_object_kind"),
+                 row.get("source_namespace"),row.get("source_object_kind"),
+                 row.get("surface_ordinal"),row.get("tag"),
+                 row.get("visible_text"),row.get("section_heading"),
+                 int(bool(row.get("fragment_meaningful")))))
 
         for row in asset_rows:
             url=row.get("url")
@@ -534,10 +663,11 @@ def _build_database(capture: Path, output: Path, store_name: str | None) -> None
             for sid,product_ref,content in sorted(mapped,key=lambda item:(item[0],item[1] or "",item[2] or "")):
                 signature=(sid,product_ref,content,row.get("object_kind"),url,row.get("asset_id"))
                 locators=[str(locator) for locator in (row.get("locators") or [])]
-                db.execute("INSERT OR IGNORE INTO product_resources VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                db.execute("INSERT OR IGNORE INTO product_resources VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (_stable_id("resource",*signature),product_ref,sid,content,str(row.get("object_kind") or "resource"),url,
                      row.get("asset_id"),row.get("raw_href"),locators[0] if locators else None,
-                     _canonical(locators),row.get("scope")))
+                     _canonical(locators),row.get("scope"),row.get("surface_ordinal"),row.get("tag"),
+                     row.get("visible_text"),row.get("section_heading")))
 
         # Source-only option products receive their published taxonomy through
         # the same native occurrence surface rather than Python label folding.
@@ -571,7 +701,7 @@ def verify_cell(path: Path) -> dict[str,Any]:
         edition=db.execute("SELECT * FROM xologic_editions").fetchall()
         if len(edition)!=1: raise CaptureError("cell must contain one source edition")
         counts={name:int(db.execute(f"SELECT count(*) FROM {name}").fetchone()[0]) for name in
-                ("products","xologic_source_observations","xologic_content_objects","source_properties","spec_occurrences","taxonomy_paths","product_links","product_resources")}
+                ("products","xologic_source_observations","source_properties","spec_occurrences","taxonomy_paths","product_links","product_resources")}
         if counts["products"]!=edition[0]["product_count"] or counts["xologic_source_observations"]!=edition[0]["source_observation_count"]:
             raise CaptureError("cell population differs from edition receipt")
         metadata = dict(db.execute("SELECT key,value FROM _metadata"))
@@ -579,9 +709,6 @@ def verify_cell(path: Path) -> dict[str,Any]:
             expected = metadata.get(f"expected_{relation}")
             if expected is None or counts[relation] != int(expected):
                 raise CaptureError(f"{relation} population differs from sealed capture")
-        for row in db.execute("SELECT content_hash,byte_count,body FROM xologic_content_objects"):
-            if len(row["body"])!=row["byte_count"] or _digest_bytes(bytes(row["body"]))!=row["content_hash"]:
-                raise CaptureError("content object hash/size differs")
         forbidden={"_raw_chunks","_raw_sources","chunks_fts"}
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if tables & forbidden: raise CaptureError("generic retrieval tables are forbidden")
@@ -619,6 +746,10 @@ def verify_cell(path: Path) -> dict[str,Any]:
         required_orient_relations = {
             "resolved_spec_values", "products_fts", "product_identifiers",
             "product_dossiers", "product_dossier_payloads",
+            "product_specification", "additional_product_details",
+            "other_details", "images", "downloads", "options",
+            "additional_options_that_would_change_other_selections",
+            "collection_products", "related_products",
         }
         if orient is None or any(name not in orient[0] for name in required_orient_relations):
             raise CaptureError("@orient does not declare the enriched XOLogic surface")
@@ -635,6 +766,7 @@ def verify_cell(path: Path) -> dict[str,Any]:
             "integrity_check":"ok",
             "edition_id":edition[0]["edition_id"],
             "orient_sha256": _digest_bytes(orient[0].encode("utf-8")),
+            "instructions_sha256": _digest_file(INSTRUCTIONS_PATH),
             "cell_sha256":_digest_file(path),
         }
 
@@ -643,8 +775,8 @@ def _build_receipt(capture: Path, verification: dict[str, Any]) -> dict[str, Any
     paths = _capture_paths(capture)
     capture_receipt = _verify_receipt(paths)
     count_names = (
-        "products", "xologic_source_observations", "xologic_content_objects",
-        "source_properties", "spec_occurrences", "taxonomy_paths",
+        "products", "xologic_source_observations", "source_properties",
+        "spec_occurrences", "taxonomy_paths",
         "product_links", "product_resources", "product_search_documents",
         "products_fts", "product_identifiers", "product_dossiers",
         "product_dossier_payloads",
@@ -657,6 +789,7 @@ def _build_receipt(capture: Path, verification: dict[str, Any]) -> dict[str, Any
         "cell_sha256": _sha256_uri(verification["cell_sha256"]),
         "edition_id": verification["edition_id"],
         "orient_sha256": _sha256_uri(verification["orient_sha256"]),
+        "instructions_sha256": _sha256_uri(verification["instructions_sha256"]),
         "counts": counts,
     }
 

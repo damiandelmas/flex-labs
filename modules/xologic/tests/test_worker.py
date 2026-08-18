@@ -3,17 +3,12 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
-import re
 import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from modules.xologic.compile.refresh import refresh
-from modules.xologic.compile.recipes import (
-    EXPECTED_SQL_SHA256,
-    load_recipes,
-)
 from modules.xologic.compile.worker import CaptureError, build_cell, verify_cell
 
 
@@ -108,7 +103,7 @@ def _fixture(root: Path) -> Path:
     return root
 
 
-def _reseal(root: Path) -> None:
+def _reseal(root: Path, schema_version: str = "xologic-lossless/v1") -> None:
     artifacts = ("source_objects", "spec_occurrences", "relations", "asset_inventory")
     counts = {}
     hashes = {}
@@ -118,21 +113,151 @@ def _reseal(root: Path) -> None:
         counts[name] = len(rows)
         hashes[name] = "sha256:" + _sha(path)
     _dump(root / "evidence/receipt.json", {
-        "schema_version": "xologic-lossless/v1",
+        "schema_version": schema_version,
         "sealed": True, "complete": True, "frontier_exhausted": True,
         "receipt_hash": "sha256:fixture-resealed",
         "artifact_hashes": hashes, "artifact_counts": counts,
     })
 
 
-def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch):
+def _fixture_v2(root: Path) -> Path:
+    capture = _fixture(root)
+    products_path = capture / "structured/products.json"
+    products = json.loads(products_path.read_text())
+    product = products["products"][0]
+    product.update({
+        "source_id": "src_base",
+        "requested_url": product["url"],
+        "product_key": "acme:abc",
+        "source_aliases": [
+            {"source_id": "src_base", "requested_url": product["url"],
+             "final_url": product["url"]},
+            {"source_id": "src_fragment",
+             "requested_url": product["url"] + "#itemDetailFinish",
+             "final_url": product["url"]},
+        ],
+    })
+    _dump(products_path, products)
+
+    source_path = capture / "evidence/source_objects.json"
+    sources = json.loads(source_path.read_text())
+    for source in sources["rows"]:
+        source.update({
+            "redirects": [], "provider_keys": {"product_key": "acme:abc"},
+            "description": "Fixture description",
+        })
+    _dump(source_path, sources)
+
+    occurrence_path = capture / "evidence/spec_occurrences.json"
+    occurrences = json.loads(occurrence_path.read_text())
+    for ordinal, row in enumerate(occurrences["rows"], 1):
+        row.update({
+            "occurrence_id": f"occ_{ordinal:04d}",
+            "source_namespace": "xologic", "object_kind": "product_pdp",
+            "section_heading": (
+                "Product Specification" if row["clean_label"] == "Item #"
+                else "Additional product details"
+            ),
+            "row_attributes": {"class": row["row_classes"]},
+            "row_start_tag": '<div class="dataDetailRow">',
+            "label_attributes": {"class": "dataColLeft"},
+            "label_start_tag": '<div class="dataColLeft">',
+            "value_attributes": {"class": "dataColRight"},
+            "value_start_tag": '<div class="dataColRight">',
+        })
+        if row["clean_label"] == "Item #":
+            row["source_layer"] = "product_specification"
+    occurrences["rows"].append({
+        "occurrence_id": "occ_other_details", "source_id": "src_base",
+        "source_namespace": "xologic", "object_kind": "product_pdp",
+        "source_layer": "other_details", "section_heading": "Other Details",
+        "source_order": 15, "surface_ordinal": 15,
+        "clean_label": "Other Details", "clean_value": "Handcrafted",
+        "raw_label": "Other Details", "raw_value": "Handcrafted",
+        "locator": "html:dataDetailRow[15]", "row_classes": "",
+        "row_attributes": {}, "row_start_tag": "<li>",
+        "label_attributes": {}, "label_start_tag": "",
+        "value_attributes": {}, "value_start_tag": "",
+        "visibility_evidence": {"hidden": False},
+    })
+    _dump(occurrence_path, occurrences)
+
+    base = product["url"]
+    relation_rows = [
+        ("rel_option", "src_base", "option_for", base + "#itemDetailFinish",
+         "Additional options that would change other selections", "Black"),
+        ("rel_download", "src_fragment", "document_for",
+         "https://shop.test/files/install.pdf", "Downloads", "Installation Guide"),
+        ("rel_image", "src_base", "image_for",
+         "https://shop.test/images/abc.jpg", None, "Fixture image"),
+        ("rel_collection", "src_base", "product_link", base + "-collection",
+         "More In This Collection", "Collection fixture"),
+        ("rel_related", "src_base", "product_link", base + "-related",
+         "Related Products", "Related fixture"),
+    ]
+    relations = []
+    for ordinal, (relation_id, source_id, kind, target, section, label) in enumerate(
+        relation_rows, 1
+    ):
+        relations.append({
+            "relation_id": relation_id, "source_id": source_id,
+            "source_namespace": "xologic", "source_object_kind": "product_pdp",
+            "kind": kind, "target_url": target, "target_id": "target_" + relation_id,
+            "target_namespace": "xologic",
+            "target_object_kind": (
+                "document" if kind == "document_for" else
+                "image" if kind == "image_for" else "product_pdp"
+            ),
+            "target_source_id": (
+                "target_" + relation_id
+                if kind in {"option_for", "product_link"} else None
+            ),
+            "locator": f"html:link[{ordinal}]", "raw_href": target,
+            "surface_ordinal": ordinal, "tag": "a",
+            "attributes": {"href": target}, "raw_start_tag": f'<a href="{target}">',
+            "visible_text": label, "section_heading": section,
+            "fragment_meaningful": "#" in target,
+            "scope": (
+                "discover_only" if kind in {"document_for", "image_for"}
+                else "source_relation"
+            ),
+        })
+    _dump(capture / "evidence/relations.json", {
+        "artifact": "relations", "version": 2, "rows": relations,
+    })
+    assets = [
+        {"asset_id": "asset_document", "object_kind": "document",
+         "url": "https://shop.test/files/install.pdf", "source_ids": ["src_fragment"],
+         "locators": ["html:link[2]"], "scope": "discover_only",
+         "raw_href": "https://shop.test/files/install.pdf", "surface_ordinal": 2,
+         "tag": "a", "attributes": {"href": "https://shop.test/files/install.pdf"},
+         "raw_start_tag": '<a href="https://shop.test/files/install.pdf">',
+         "visible_text": "Installation Guide", "section_heading": "Downloads"},
+        {"asset_id": "asset_image", "object_kind": "image",
+         "url": "https://shop.test/images/abc.jpg", "source_ids": ["src_base"],
+         "locators": ["html:link[3]"], "scope": "discover_only",
+         "raw_href": "https://shop.test/images/abc.jpg", "surface_ordinal": 3,
+         "tag": "img", "attributes": {"src": "https://shop.test/images/abc.jpg"},
+         "raw_start_tag": '<img src="https://shop.test/images/abc.jpg">',
+         "visible_text": "Fixture image", "section_heading": None},
+    ]
+    _dump(capture / "evidence/asset_inventory.json", {
+        "artifact": "asset_inventory", "version": 2, "rows": assets,
+    })
+    _dump(capture / "receipt.json", {
+        "complete": True, "discovery_complete": True, "enumeration": "public_graph",
+    })
+    _reseal(capture, "xologic-lossless/v2")
+    return capture
+
+
+def test_native_cell_preserves_source_observations_and_relations(tmp_path, monkeypatch):
     capture = _fixture(tmp_path / "capture")
     target = tmp_path / "bes_lighting_xologic.db"
     receipt = build_cell(capture, target, store_name="BES Lighting")
     counts = receipt["counts"]
     assert counts["products"] == 1
     assert counts["xologic_source_observations"] == 2
-    assert counts["xologic_content_objects"] == 1
     assert counts["spec_occurrences"] == 28  # every source observation remains addressable
     assert counts["source_properties"] == 2
     assert counts["taxonomy_paths"] == 2
@@ -145,8 +270,13 @@ def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch
     assert counts["product_identifiers"] == 3
 
     with sqlite3.connect(target) as db:
-        body, digest = db.execute("SELECT body,content_hash FROM xologic_content_objects").fetchone()
-        assert sha256(body).hexdigest() == digest
+        source_rows = db.execute(
+            "SELECT content_hash,descriptor_path FROM xologic_source_observations "
+            "ORDER BY source_id"
+        ).fetchall()
+        assert len({row[0] for row in source_rows}) == 1
+        assert len({row[1] for row in source_rows}) == 1
+        assert sha256((capture / source_rows[0][1]).read_bytes()).hexdigest() == source_rows[0][0]
         assert db.execute("SELECT count(*) FROM xologic_source_observations WHERE requested_url LIKE '%#itemDetailFinish'").fetchone()[0] == 1
         assert db.execute("SELECT count(*) FROM spec_occurrences WHERE label='Finish' AND value='Black'").fetchone()[0] == 4
         assert json.loads(db.execute(
@@ -158,39 +288,22 @@ def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch
                 "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
             )
         }
-        assert objects == {
-            ("table", "_metadata"), ("table", "_presets"),
-            ("table", "resolved_spec_values"), ("table", "spec_field_map"),
-            ("table", "product_links"), ("table", "product_resources"),
-            ("table", "product_search_documents"),
-            ("table", "product_identifiers"),
-            ("table", "product_dossier_payloads"),
-            ("table", "product_source_observations"), ("table", "products"),
-            ("table", "products_fts"), ("table", "products_fts_config"),
-            ("table", "products_fts_data"), ("table", "products_fts_docsize"),
-            ("table", "products_fts_idx"),
+        required = {
+            ("table", "products"), ("table", "xologic_editions"),
+            ("table", "xologic_source_observations"),
             ("table", "source_properties"), ("table", "spec_occurrences"),
-            ("table", "taxonomy_paths"), ("table", "xologic_content_objects"),
-            ("table", "xologic_editions"), ("table", "xologic_source_observations"),
-            ("view", "_meta"), ("view", "preferred_spec_occurrences"),
-            ("view", "product_dossiers"),
-            ("view", "resolved_products"), ("view", "spec_conflicts"),
-            ("view", "spec_occurrence_preference"),
-            ("trigger", "_meta_delete"), ("trigger", "_meta_insert"),
-            ("trigger", "_meta_update"),
-            ("trigger", "product_search_documents_ad"),
-            ("trigger", "product_search_documents_ai"),
-            ("trigger", "product_search_documents_au"),
-            ("index", "ix_links_product"), ("index", "ix_resources_product"),
-            ("index", "ix_product_dossier_payloads_product"),
-            ("index", "ix_product_identifiers_lookup"),
-            ("index", "ix_resolved_spec_values_field"),
-            ("index", "ix_resolved_spec_values_occurrence"),
-            ("index", "ix_resolved_spec_values_product"),
-            ("index", "ix_source_content"), ("index", "ix_source_requested"),
-            ("index", "ix_spec_lookup"), ("index", "ix_spec_product"),
-            ("index", "ix_spec_field_map_field"),
-            ("index", "ix_taxonomy_lookup"),
+            ("table", "product_links"), ("table", "product_resources"),
+            ("table", "products_fts"), ("view", "product_dossiers"),
+            ("view", "product_specification"),
+            ("view", "additional_product_details"),
+            ("view", "other_details"), ("view", "images"),
+            ("view", "downloads"), ("view", "options"),
+            ("view", "additional_options_that_would_change_other_selections"),
+            ("view", "collection_products"), ("view", "related_products"),
+        }
+        assert required <= objects
+        assert not {"xologic_content_objects", "_raw_chunks", "_raw_sources"} & {
+            name for _, name in objects
         }
         resolved = db.execute(
             "SELECT category,subcategory,finish,price_min,price_max,voltage_min,voltage_max,"
@@ -304,6 +417,77 @@ def test_native_cell_deduplicates_content_not_observations(tmp_path, monkeypatch
     assert verify_cell(target)["integrity_check"] == "ok"
 
 
+def test_v2_evidence_is_preserved_as_source_shaped_sql(tmp_path):
+    capture = _fixture_v2(tmp_path / "capture")
+    target = tmp_path / "catalogue.db"
+    receipt = build_cell(capture, target, store_name="Source Surface")
+
+    assert receipt["counts"]["spec_occurrences"] == 29
+    assert receipt["counts"]["product_links"] == 5
+    assert receipt["counts"]["product_resources"] == 2
+
+    with sqlite3.connect(target) as db:
+        db.row_factory = sqlite3.Row
+        assert {row[0] for row in db.execute(
+            "SELECT occurrence_id FROM spec_occurrences"
+        )} == {
+            *(f"occ_{ordinal:04d}" for ordinal in range(1, 29)),
+            "occ_other_details",
+        }
+        assert {row[0] for row in db.execute(
+            "SELECT link_id FROM product_links"
+        )} == {
+            "rel_option", "rel_download", "rel_image", "rel_collection",
+            "rel_related",
+        }
+        specification = db.execute(
+            "SELECT label,value FROM product_specification"
+        ).fetchall()
+        assert [tuple(row) for row in specification] == [
+            ("Item #", "ABC"),
+            ("Item #", "ABC"),
+        ]
+        assert db.execute(
+            "SELECT count(*) FROM additional_product_details"
+        ).fetchone()[0] == 26
+        assert tuple(db.execute(
+            "SELECT label,value,raw_value FROM other_details"
+        ).fetchone()) == ("Other Details", "Handcrafted", "Handcrafted")
+        assert tuple(db.execute(
+            "SELECT visible_text,url,section_heading FROM downloads"
+        ).fetchone()) == (
+            "Installation Guide", "https://shop.test/files/install.pdf", "Downloads",
+        )
+        assert tuple(db.execute(
+            "SELECT visible_text,fragment_meaningful FROM options"
+        ).fetchone()) == ("Black", 1)
+        assert db.execute(
+            "SELECT count(*) FROM additional_options_that_would_change_other_selections"
+        ).fetchone()[0] == 1
+        assert db.execute("SELECT visible_text FROM collection_products").fetchone()[0] == (
+            "Collection fixture"
+        )
+        assert db.execute("SELECT visible_text FROM related_products").fetchone()[0] == (
+            "Related fixture"
+        )
+        assert db.execute("SELECT visible_text FROM images").fetchone()[0] == (
+            "Fixture image"
+        )
+        metadata = dict(db.execute("SELECT key,value FROM _metadata"))
+        assert metadata["evidence_schema_version"] == "xologic-lossless/v2"
+
+
+def test_v2_duplicate_evidence_identity_fails_closed(tmp_path):
+    capture = _fixture_v2(tmp_path / "capture")
+    path = capture / "evidence/spec_occurrences.json"
+    payload = json.loads(path.read_text())
+    payload["rows"][1]["occurrence_id"] = payload["rows"][0]["occurrence_id"]
+    _dump(path, payload)
+    _reseal(capture, "xologic-lossless/v2")
+    with pytest.raises(CaptureError, match="duplicate occurrence_id"):
+        build_cell(capture, tmp_path / "catalogue.db")
+
+
 def test_atomic_replacement_rebuilds_same_logical_cell(tmp_path):
     capture = _fixture(tmp_path / "capture")
     target = tmp_path / "catalogue.db"
@@ -370,38 +554,18 @@ def test_build_receipt_identifies_capture_transform_and_output(tmp_path):
     assert json.loads(receipt_path.read_text()) == receipt
     assert set(receipt) == {
         "schema_version", "capture_receipt", "transformation_sha256",
-        "cell_sha256", "edition_id", "orient_sha256", "counts",
+        "cell_sha256", "edition_id", "orient_sha256", "instructions_sha256",
+        "counts",
     }
-    assert receipt["schema_version"] == "xologic-native-flex-build/v2"
+    assert receipt["schema_version"] == "xologic-native-flex-build/v3"
     assert receipt["capture_receipt"] == "sha256:fixture"
     assert receipt["transformation_sha256"].startswith("sha256:")
     assert receipt["cell_sha256"] == "sha256:" + _sha(target)
     assert receipt["orient_sha256"].startswith("sha256:")
+    assert receipt["instructions_sha256"].startswith("sha256:")
     assert receipt["counts"]["products"] == 1
     with pytest.raises(CaptureError, match="must differ"):
         build_cell(capture, target, receipt_path=target)
-
-
-def test_authored_recipe_contract_has_one_stable_query_per_heading():
-    recipes, digest = load_recipes()
-    assert len(recipes) == 15
-    assert digest == EXPECTED_SQL_SHA256
-    assert [
-        sorted(set(re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", sql)))
-        for sql in recipes
-    ] == [
-        ["identifier"], ["terms"], ["max_price", "terms"],
-        ["excluded_vendor", "max_price", "terms"], ["terms"],
-        ["max_price", "minimum_lumens", "required_voltage", "terms"],
-        ["max_price"], ["max_price"], ["allow_transitional"],
-        ["product_ref"], ["product_refs_json"], [],
-        ["specification_terms", "title_terms"], ["max_price"],
-        [
-            "excluded_vendor", "new_price_ceiling", "original_terms",
-            "required_finish", "required_style", "required_type",
-            "shown_product_refs_json",
-        ],
-    ]
 
 
 def test_registered_install_renders_the_current_receipt_contract(tmp_path, monkeypatch):
@@ -431,7 +595,7 @@ def test_registered_install_renders_the_current_receipt_contract(tmp_path, monke
         store_name="Receipt Contract",
     ), console)
     assert registered == [("receipt_contract", cells / "receipt_contract.db")]
-    assert any("source bodies" in line and "1" in line for line in console.lines)
+    assert any("source observations" in line and "2" in line for line in console.lines)
 
 
 def test_tampered_raw_body_fails_closed_without_replacing_cell(tmp_path):

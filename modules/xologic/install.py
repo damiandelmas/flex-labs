@@ -9,7 +9,7 @@ MODULE_SUMMARY = "compile a sealed XOLogic catalogue capture into native SQLite"
 MODULE = {
     "cell_type": "xologic",
     "maturity": "labs-source-cell",
-    "description": "Source-faithful XOLogic catalogue: exact bodies, native occurrences, and SQL projections.",
+    "description": "Source-faithful XOLogic catalogue: source pointers, native occurrences, and SQL projections.",
     "default_cell_name": "xologic_catalogue",
     "refresh_module": "flex.modules.xologic.compile.refresh",
     "refresh_interval": 6 * 60 * 60,
@@ -45,5 +45,5 @@ def run(args, console) -> None:
     register_cell_path(name, path, description=MODULE["description"])
     console.print(f"  cell                [bold green]{name}[/bold green]")
     console.print(f"  products            [green]{receipt['counts']['products']}[/green]")
-    console.print(f"  source bodies       [green]{receipt['counts']['xologic_content_objects']}[/green]")
+    console.print(f"  source observations [green]{receipt['counts']['xologic_source_observations']}[/green]")
     console.print(f"  flex search --cell {name} \"@orient\"")

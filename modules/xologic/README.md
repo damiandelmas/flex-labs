@@ -1,8 +1,9 @@
 # XOLogic Flex source module
 
 This module compiles one sealed XOLogic capture into one native SQLite Flex
-cell. Exact source bytes are stored once by SHA-256; exact URL observations and
-native product/specification/resource rows reference those bodies.
+cell. Exact source bytes remain in the sealed capture; the cell contains their
+source pointers and hashes beside native product, specification, link, and
+resource relations.
 
 The artifact-only factory path writes no registry state:
 
@@ -15,15 +16,7 @@ python -m modules.xologic.compile.worker \
 ```
 
 The compact receipt identifies the sealed capture, transformation bytes, final
-SQLite, installed `@orient`, and relation populations. BES has an optional
-acceptance command that executes its fifteen authored SQL recipes directly
-against an artifact:
-
-```bash
-python -m modules.xologic.compile.recipes \
-  --cell /isolated/path/store_xologic.db \
-  --receipt /isolated/path/store_xologic.recipes.json
-```
+SQLite, installed `@orient`, instruction artifact, and relation populations.
 
 Registration and refresh are separate downstream operations:
 
@@ -43,7 +36,11 @@ python -m flex.refresh --cells bes_lighting_xologic --dry-run
 The capture directory must contain `structured/products.json`, a sealed and
 complete `evidence/receipt.json`, the four evidence row artifacts, and every
 raw object named by a source observation. Preference, conflicts, and resolved
-products are SQL projections. `product_search_documents` and `products_fts`
+products are SQL projections. The provider-named `product_specification`,
+`additional_product_details`, `other_details`, `images`, `downloads`, `options`,
+`additional_options_that_would_change_other_selections`, `collection_products`,
+and `related_products` views expose the visible source surfaces without replacing
+their exact occurrences and link relations. `product_search_documents` and `products_fts`
 provide derived product-specific keyword discovery over titles, identifiers,
 vendors, taxonomy, and published specifications; native relations remain the
 authority for returned facts. `@orient` is the only installed saved query and

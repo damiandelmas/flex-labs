@@ -138,9 +138,8 @@ END;
 
 -- Generic product-return contract. Search, filtering, and ranking may operate
 -- over narrower relations internally, but every product row handed to an agent
--- is expanded through this view. Native source bodies remain stored once in
--- xologic_content_objects and are recoverable through the content hashes and
--- descriptors included below.
+-- is expanded through this view. Native source bodies remain in the sealed
+-- capture and are recoverable through xologic_source_observations.
 CREATE VIEW product_dossiers AS
 SELECT
   r.product_ref,
