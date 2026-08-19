@@ -25,6 +25,11 @@ MODULE = {
     "refresh_interval": 6 * 60 * 60,
     "views_from": ("woocommerce",),
     "presets_from": ("woocommerce",),
+    # The Woo module has one vertical contract.  Keep its authored retrieval
+    # instructions beside the lighting SQL/presets instead of pretending that
+    # a generic stock/ directory exists.
+    "instructions_from": ("woocommerce",),
+    "instructions_path": "lighting/instructions.md",
     "query_examples": ("@orient", "@scope", "@products", "@categories"),
 }
 

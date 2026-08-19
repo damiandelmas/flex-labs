@@ -23,6 +23,14 @@ from modules.woocommerce.compile.worker import (
 SITE = "https://example-woo.test"
 
 
+def test_module_declares_one_lighting_instruction_contract():
+    from modules.woocommerce.install import MODULE
+
+    assert MODULE["instructions_from"] == ("woocommerce",)
+    assert MODULE["instructions_path"] == "lighting/instructions.md"
+    assert (Path(__file__).parents[1] / MODULE["instructions_path"]).is_file()
+
+
 def _product(native_id: int) -> dict:
     return {
         "id": native_id,
