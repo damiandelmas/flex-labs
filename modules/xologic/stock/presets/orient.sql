@@ -62,8 +62,8 @@ WITH contract(name,grain,contents,join_key) AS (VALUES
  ('product_identifiers','one row per product identifier occurrence','Searchable SKU, part number, GTIN, and handle identities','product_ref'),
  ('product_search_documents','one row per compiled product identity','Rebuildable product-discovery text projection','product_ref'),
  ('products_fts','one row per compiled product identity','FTS5 index over product_search_documents','product_ref'),
- ('product_dossiers','one row per compiled product identity','Complete derived product dossier with native relations represented as JSON arrays','product_ref'),
- ('product_dossier_payloads','one row per compiled product identity','Deterministically serialized complete dossier','product_ref')
+ ('product_dossiers','one row per compiled product identity','Derived Agent payload with native relations represented as deterministic JSON arrays; literal relations remain authoritative','product_ref'),
+ ('product_dossier_payloads','one row per compiled product identity','Deterministically serialized derived Agent dossier payload','product_ref')
 )
 SELECT m.type AS kind,c.name,c.grain,c.contents,c.join_key,
        GROUP_CONCAT(p.name,', ') AS columns
@@ -76,4 +76,6 @@ ORDER BY c.name;
 SELECT 'Source strings are preserved as observed; derived preferences are SQL interpretations.' AS limitation
 UNION ALL SELECT 'products_fts is a rebuildable product-discovery index; native and resolved relations remain the authority for product claims.'
 UNION ALL SELECT 'Image and document links are retained as visible source relations; their target bytes are not part of this edition.'
+UNION ALL SELECT 'product_dossiers is a derived Agent payload for transport; it is not a lossless replacement for xologic_source_observations, source_properties, spec_occurrences, product_links, or product_resources.'
+UNION ALL SELECT 'source_properties may be absent or empty in a sealed capture; literal relations and source observations remain the authority for claims.'
 UNION ALL SELECT 'Text embeddings, image embeddings, generic relationships, trees, and operation logs are not installed.';

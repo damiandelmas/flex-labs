@@ -190,6 +190,200 @@ SELECT
   r.minimum_dim_percent_min,
   r.minimum_dim_percent_max,
   r.preferred_specs_json,
+  CASE
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM product_source_observations AS pso
+      JOIN xologic_source_observations AS so USING(source_id)
+      WHERE pso.product_ref=r.product_ref
+    ) THEN 'absent'
+    WHEN EXISTS (
+      SELECT 1
+      FROM product_source_observations AS pso
+      JOIN xologic_source_observations AS so USING(source_id)
+      WHERE pso.product_ref=r.product_ref AND so.status BETWEEN 200 AND 299
+    ) THEN 'live'
+    ELSE 'stale'
+  END AS details_status,
+  (
+    SELECT count(*)
+    FROM product_source_observations AS pso
+    JOIN xologic_source_observations AS so USING(source_id)
+    WHERE pso.product_ref=r.product_ref
+  ) AS terminal_observation_count,
+  (
+    SELECT count(DISTINCT COALESCE(so.source_namespace,''))
+    FROM product_source_observations AS pso
+    JOIN xologic_source_observations AS so USING(source_id)
+    WHERE pso.product_ref=r.product_ref
+  ) AS terminal_provider_count,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'source_namespace',q.source_namespace,
+      'object_kind',q.object_kind,
+      'parser_identity',q.parser_identity,
+      'config_identity',q.config_identity,
+      'code_identity',q.code_identity,
+      'observation_count',q.observation_count
+    ))
+    FROM (
+      SELECT
+        so.source_namespace,so.object_kind,so.parser_identity,
+        so.config_identity,so.code_identity,count(*) AS observation_count
+      FROM product_source_observations AS pso
+      JOIN xologic_source_observations AS so USING(source_id)
+      WHERE pso.product_ref=r.product_ref
+      GROUP BY so.source_namespace,so.object_kind,so.parser_identity,
+               so.config_identity,so.code_identity
+      ORDER BY so.source_namespace,so.object_kind,so.parser_identity,
+               so.config_identity,so.code_identity
+    ) AS q
+  ),'[]') AS terminal_providers,
+  (
+    SELECT count(DISTINCT q.source_id)
+    FROM (
+      SELECT l.source_id
+      FROM product_links AS l
+      WHERE l.product_ref=r.product_ref AND l.scope='discover_only'
+      UNION ALL
+      SELECT x.source_id
+      FROM product_resources AS x
+      WHERE x.product_ref=r.product_ref AND x.scope='discover_only'
+    ) AS q
+  ) AS discovery_observation_count,
+  (
+    SELECT count(*)
+    FROM json_each(
+      CASE WHEN json_valid(r.product_json) THEN r.product_json ELSE '{}' END,
+      '$.variants'
+    ) AS v
+    WHERE trim(COALESCE(CAST(json_extract(v.value,'$.price') AS TEXT),''))<>''
+  ) AS listing_price_observation_count,
+  (
+    SELECT count(DISTINCT trim(CAST(json_extract(v.value,'$.price') AS TEXT)))
+    FROM json_each(
+      CASE WHEN json_valid(r.product_json) THEN r.product_json ELSE '{}' END,
+      '$.variants'
+    ) AS v
+    WHERE trim(COALESCE(CAST(json_extract(v.value,'$.price') AS TEXT),''))<>''
+  ) AS listing_price_distinct_count,
+  json_object(
+    'native_products','present',
+    'source_recovery','present',
+    'source_properties',
+      CASE WHEN EXISTS (SELECT 1 FROM source_properties)
+           THEN 'present' ELSE 'absent_or_empty' END,
+    'expected_source_properties',
+      CAST(COALESCE((SELECT value FROM _metadata WHERE key='expected_source_properties'),'0') AS INTEGER),
+    'expected_spec_occurrences',
+      CAST(COALESCE((SELECT value FROM _metadata WHERE key='expected_spec_occurrences'),'0') AS INTEGER),
+    'expected_product_links',
+      CAST(COALESCE((SELECT value FROM _metadata WHERE key='expected_product_links'),'0') AS INTEGER),
+    'expected_product_resources',
+      CAST(COALESCE((SELECT value FROM _metadata WHERE key='expected_product_resources'),'0') AS INTEGER),
+    'evidence_receipt',(SELECT value FROM _metadata WHERE key='evidence_receipt'),
+    'evidence_schema_version',(SELECT value FROM _metadata WHERE key='evidence_schema_version'),
+    'authority',(SELECT value FROM _metadata WHERE key='authority'),
+    'serving_projection_is_source_claim',json('false')
+  ) AS source_completeness_json,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'relation_id',q.relation_id,'source_id',q.source_id,
+      'surface_ordinal',q.surface_ordinal,'visible_text',q.visible_text,
+      'url',q.url,'raw_href',q.raw_href,'locator',q.locator,
+      'tag',q.tag,'section_heading',q.section_heading,'scope',q.scope
+    ))
+    FROM (
+      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
+             locator,tag,section_heading,scope
+      FROM images
+      WHERE product_ref=r.product_ref
+      ORDER BY COALESCE(surface_ordinal,0),url,relation_id
+    ) AS q
+  ),'[]') AS images_json,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'relation_id',q.relation_id,'source_id',q.source_id,
+      'surface_ordinal',q.surface_ordinal,'visible_text',q.visible_text,
+      'url',q.url,'raw_href',q.raw_href,'locator',q.locator,
+      'tag',q.tag,'section_heading',q.section_heading,'scope',q.scope
+    ))
+    FROM (
+      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
+             locator,tag,section_heading,scope
+      FROM downloads
+      WHERE product_ref=r.product_ref
+      ORDER BY COALESCE(surface_ordinal,0),url,relation_id
+    ) AS q
+  ),'[]') AS downloads_json,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'relation_id',q.relation_id,'source_id',q.source_id,
+      'surface_ordinal',q.surface_ordinal,'visible_text',q.visible_text,
+      'url',q.url,'raw_href',q.raw_href,'locator',q.locator,
+      'tag',q.tag,'section_heading',q.section_heading,
+      'fragment_meaningful',q.fragment_meaningful,
+      'target_id',q.target_id,'target_source_id',q.target_source_id
+    ))
+    FROM (
+      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
+             locator,tag,section_heading,fragment_meaningful,target_id,
+             target_source_id
+      FROM options
+      WHERE product_ref=r.product_ref
+      ORDER BY COALESCE(surface_ordinal,0),url,relation_id
+    ) AS q
+  ),'[]') AS options_json,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'relation_id',q.relation_id,'source_id',q.source_id,
+      'surface_ordinal',q.surface_ordinal,'visible_text',q.visible_text,
+      'url',q.url,'raw_href',q.raw_href,'locator',q.locator,
+      'tag',q.tag,'section_heading',q.section_heading,
+      'fragment_meaningful',q.fragment_meaningful,
+      'target_id',q.target_id,'target_source_id',q.target_source_id
+    ))
+    FROM (
+      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
+             locator,tag,section_heading,fragment_meaningful,target_id,
+             target_source_id
+      FROM additional_options_that_would_change_other_selections
+      WHERE product_ref=r.product_ref
+      ORDER BY COALESCE(surface_ordinal,0),url,relation_id
+    ) AS q
+  ),'[]') AS additional_options_that_would_change_other_selections_json,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'relation_id',q.relation_id,'source_id',q.source_id,
+      'surface_ordinal',q.surface_ordinal,'visible_text',q.visible_text,
+      'url',q.url,'raw_href',q.raw_href,'locator',q.locator,
+      'tag',q.tag,'target_id',q.target_id,
+      'target_source_id',q.target_source_id
+    ))
+    FROM (
+      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
+             locator,tag,target_id,target_source_id
+      FROM collection_products
+      WHERE product_ref=r.product_ref
+      ORDER BY COALESCE(surface_ordinal,0),url,relation_id
+    ) AS q
+  ),'[]') AS collection_products_json,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'relation_id',q.relation_id,'source_id',q.source_id,
+      'surface_ordinal',q.surface_ordinal,'visible_text',q.visible_text,
+      'url',q.url,'raw_href',q.raw_href,'locator',q.locator,
+      'tag',q.tag,'target_id',q.target_id,
+      'target_source_id',q.target_source_id
+    ))
+    FROM (
+      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
+             locator,tag,target_id,target_source_id
+      FROM related_products
+      WHERE product_ref=r.product_ref
+      ORDER BY COALESCE(surface_ordinal,0),url,relation_id
+    ) AS q
+  ),'[]') AS related_products_json,
   COALESCE((
     SELECT json_group_array(json_array(q.depth,q.label))
     FROM (
@@ -262,6 +456,7 @@ FROM resolved_products AS r;
 CREATE TABLE product_dossier_payloads AS
 SELECT
   d.product_ref,
+  json_patch(
   json_object(
     'product_ref',d.product_ref,'url',d.url,'sku',d.sku,
     'partnumber',d.partnumber,'gtin',d.gtin,'title',d.title,
@@ -289,12 +484,36 @@ SELECT
     'dimming_protocols',d.dimming_protocols,
     'minimum_dim_percent_min',d.minimum_dim_percent_min,
     'minimum_dim_percent_max',d.minimum_dim_percent_max,
-    'preferred_specs',json(d.preferred_specs_json),
+    'preferred_specs',json(d.preferred_specs_json)
+  ),
+  json_object(
+    'details_status',d.details_status,
+    'terminal',json_object(
+      'observation_count',d.terminal_observation_count,
+      'provider_count',d.terminal_provider_count,
+      'providers',json(d.terminal_providers)
+    ),
+    'discovery',json_object(
+      'observation_count',d.discovery_observation_count
+    ),
+    'listing_price',json_object(
+      'observation_count',d.listing_price_observation_count,
+      'distinct_count',d.listing_price_distinct_count
+    ),
+    'source_completeness',json(d.source_completeness_json),
     'taxonomy',json(d.taxonomy_json),
     'specifications',json(d.specifications_json),
     'conflicts',json(d.conflicts_json),
     'variants',json(d.variants_json),
-    'documents',json(d.documents_json)
+    'documents',json(d.documents_json),
+    'images',json(d.images_json),
+    'downloads',json(d.downloads_json),
+    'options',json(d.options_json),
+    'additional_options_that_would_change_other_selections',
+      json(d.additional_options_that_would_change_other_selections_json),
+    'collection_products',json(d.collection_products_json),
+    'related_products',json(d.related_products_json)
+  )
   ) AS dossier_json
 FROM product_dossiers AS d;
 

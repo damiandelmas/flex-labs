@@ -477,6 +477,142 @@ def test_v2_evidence_is_preserved_as_source_shaped_sql(tmp_path):
         assert metadata["evidence_schema_version"] == "xologic-lossless/v2"
 
 
+def test_v2_dossier_v3_payload_preserves_relation_parity_and_boundaries(tmp_path):
+    capture = _fixture_v2(tmp_path / "capture")
+    target = tmp_path / "catalogue.db"
+    build_cell(capture, target, store_name="Dossier V3")
+
+    relation_columns = {
+        "images": (
+            "relation_id", "source_id", "surface_ordinal", "visible_text",
+            "url", "raw_href", "locator", "tag", "section_heading", "scope",
+        ),
+        "downloads": (
+            "relation_id", "source_id", "surface_ordinal", "visible_text",
+            "url", "raw_href", "locator", "tag", "section_heading", "scope",
+        ),
+        "options": (
+            "relation_id", "source_id", "surface_ordinal", "visible_text",
+            "url", "raw_href", "locator", "tag", "section_heading",
+            "fragment_meaningful", "target_id", "target_source_id",
+        ),
+        "additional_options_that_would_change_other_selections": (
+            "relation_id", "source_id", "surface_ordinal", "visible_text",
+            "url", "raw_href", "locator", "tag", "section_heading",
+            "fragment_meaningful", "target_id", "target_source_id",
+        ),
+        "collection_products": (
+            "relation_id", "source_id", "surface_ordinal", "visible_text",
+            "url", "raw_href", "locator", "tag", "target_id",
+            "target_source_id",
+        ),
+        "related_products": (
+            "relation_id", "source_id", "surface_ordinal", "visible_text",
+            "url", "raw_href", "locator", "tag", "target_id",
+            "target_source_id",
+        ),
+    }
+
+    with sqlite3.connect(target) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT * FROM product_dossiers").fetchone()
+        assert row["details_status"] == "live"
+        assert row["terminal_observation_count"] == 2
+        assert row["terminal_provider_count"] == 1
+        assert row["discovery_observation_count"] == 2
+        assert row["listing_price_observation_count"] == 1
+        assert row["listing_price_distinct_count"] == 1
+        assert json.loads(row["terminal_providers"]) == [{
+            "source_namespace": "xologic",
+            "object_kind": "product_pdp",
+            "parser_identity": "parser/v1",
+            "config_identity": "config/v1",
+            "code_identity": "code/v1",
+            "observation_count": 2,
+        }]
+        completeness = json.loads(row["source_completeness_json"])
+        assert completeness["expected_source_properties"] == 2
+        assert completeness["expected_spec_occurrences"] == 29
+        assert completeness["expected_product_links"] == 5
+        assert completeness["expected_product_resources"] == 2
+        assert completeness["source_properties"] == "present"
+        assert completeness["serving_projection_is_source_claim"] is False
+
+        for relation, columns in relation_columns.items():
+            native = [
+                {column: value for column, value in zip(columns, values)}
+                for values in db.execute(
+                    f"SELECT {','.join(columns)} FROM {relation} "
+                    "ORDER BY COALESCE(surface_ordinal,0),url,relation_id"
+                )
+            ]
+            assert json.loads(row[f"{relation}_json"]) == native
+
+        assert json.loads(row["images_json"])[0]["relation_id"] == "rel_image"
+        assert json.loads(row["downloads_json"])[0]["relation_id"] == "rel_download"
+        assert json.loads(row["options_json"])[0]["relation_id"] == "rel_option"
+        payload = json.loads(db.execute(
+            "SELECT dossier_json FROM product_dossier_payloads"
+        ).fetchone()[0])
+        assert payload["details_status"] == "live"
+        assert payload["terminal"]["observation_count"] == 2
+        assert payload["terminal"]["providers"] == json.loads(row["terminal_providers"])
+        assert payload["discovery"] == {"observation_count": 2}
+        assert payload["source_completeness"] == completeness
+        assert payload["images"] == json.loads(row["images_json"])
+        assert payload["downloads"] == json.loads(row["downloads_json"])
+        assert payload["options"] == json.loads(row["options_json"])
+        assert payload["additional_options_that_would_change_other_selections"] == (
+            json.loads(row["additional_options_that_would_change_other_selections_json"])
+        )
+        assert payload["collection_products"] == json.loads(row["collection_products_json"])
+        assert payload["related_products"] == json.loads(row["related_products_json"])
+
+
+def test_dossier_v3_marks_terminal_details_stale_without_live_observation(tmp_path):
+    capture = _fixture_v2(tmp_path / "capture")
+    source_path = capture / "evidence/source_objects.json"
+    payload = json.loads(source_path.read_text())
+    for source in payload["rows"]:
+        source["status"] = 404
+    _dump(source_path, payload)
+    _reseal(capture, "xologic-lossless/v2")
+
+    target = tmp_path / "catalogue.db"
+    build_cell(capture, target)
+    with sqlite3.connect(target) as db:
+        assert db.execute(
+            "SELECT details_status,terminal_observation_count "
+            "FROM product_dossiers"
+        ).fetchone() == ("stale", 2)
+        decoded = json.loads(db.execute(
+            "SELECT dossier_json FROM product_dossier_payloads"
+        ).fetchone()[0])
+        assert decoded["details_status"] == "stale"
+
+
+def test_dossier_v3_is_honest_when_source_properties_are_empty(tmp_path):
+    capture = _fixture_v2(tmp_path / "capture")
+    source_path = capture / "evidence/source_objects.json"
+    payload = json.loads(source_path.read_text())
+    for source in payload["rows"]:
+        source["structured_properties"] = []
+    _dump(source_path, payload)
+    _reseal(capture, "xologic-lossless/v2")
+
+    target = tmp_path / "catalogue.db"
+    build_cell(capture, target)
+    with sqlite3.connect(target) as db:
+        assert db.execute("SELECT count(*) FROM source_properties").fetchone()[0] == 0
+        completeness = json.loads(db.execute(
+            "SELECT source_completeness_json FROM product_dossiers"
+        ).fetchone()[0])
+        assert completeness["source_properties"] == "absent_or_empty"
+        assert completeness["expected_source_properties"] == 0
+        assert completeness["serving_projection_is_source_claim"] is False
+        assert db.execute("SELECT count(*) FROM product_links").fetchone()[0] == 5
+
+
 def test_v2_duplicate_evidence_identity_fails_closed(tmp_path):
     capture = _fixture_v2(tmp_path / "capture")
     path = capture / "evidence/spec_occurrences.json"

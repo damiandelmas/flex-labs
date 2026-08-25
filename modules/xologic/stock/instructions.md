@@ -45,7 +45,10 @@ Every product returned across the tool boundary must be a complete row from
 inside CTEs, retain the resulting `product_ref` values, and join those identities
 to `product_dossiers` for the final product result. Do not return hand-picked
 product columns: a partial product row invites unsupported inference about
-omitted fields. Dossiers include every distinct published specification and
+omitted fields. The dossier is a derived Agent payload for transport and answer
+grounding; it is not a lossless replacement for `xologic_source_observations`,
+`source_properties`, `spec_occurrences`, `product_links`, or
+`product_resources`. Dossiers include every distinct published specification and
 customer-usable relationship with occurrence counts. Primary product images and
 published documents are included; crawl-only pixels, site icons, raw provider
 JSON, HTML, and physical source locators remain available in native relations
@@ -103,9 +106,12 @@ notation or interpretation matters.
 
 Use taxonomy relations for the provider's complete category path, product-link
 relations for published variants and options, and product-resource relations for
-images and documents. Resolve finish and family questions through actual linked
-or matching product SKUs rather than title similarity. Return exact SKUs, option
-values, and URLs from SQL.
+images and documents. `source_properties` may be absent or empty in a sealed
+capture; do not treat that absence as proof that literal product relations are
+missing. Literal source observations, specification occurrences, product links,
+and product resources are the authority for source claims. Resolve finish and
+family questions through actual linked or matching product SKUs rather than
+title similarity. Return exact SKUs, option values, and URLs from SQL.
 
 Include the identifying columns and exact product URL needed to ground the
 answer. Copy URLs verbatim: never shorten, reconstruct, normalize, or infer one.
