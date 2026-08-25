@@ -59,6 +59,7 @@ WITH contract(name,grain,contents,join_key) AS (VALUES
  ('spec_field_map','one row per exact normalized source label','Declared mapping from source labels to derived lighting fields','normalized_label'),
  ('resolved_spec_values','one row per mapped source occurrence','Typed SQL interpretation with parse status and provenance','product_ref; occurrence_id'),
  ('resolved_products','one row per compiled product identity','Derived buyer-facing fields beside the source-faithful relations','product_ref'),
+ ('agent_product_status','one row per compiled product identity','Shared Agent status and count contract consumed by product_dossiers','product_ref'),
  ('product_identifiers','one row per product identifier occurrence','Searchable SKU, part number, GTIN, and handle identities','product_ref'),
  ('product_search_documents','one row per compiled product identity','Rebuildable product-discovery text projection','product_ref'),
  ('products_fts','one row per compiled product identity','FTS5 index over product_search_documents','product_ref'),

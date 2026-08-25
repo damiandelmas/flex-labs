@@ -190,83 +190,13 @@ SELECT
   r.minimum_dim_percent_min,
   r.minimum_dim_percent_max,
   r.preferred_specs_json,
-  CASE
-    WHEN NOT EXISTS (
-      SELECT 1
-      FROM product_source_observations AS pso
-      JOIN xologic_source_observations AS so USING(source_id)
-      WHERE pso.product_ref=r.product_ref
-    ) THEN 'absent'
-    WHEN EXISTS (
-      SELECT 1
-      FROM product_source_observations AS pso
-      JOIN xologic_source_observations AS so USING(source_id)
-      WHERE pso.product_ref=r.product_ref AND so.status BETWEEN 200 AND 299
-    ) THEN 'live'
-    ELSE 'stale'
-  END AS details_status,
-  (
-    SELECT count(*)
-    FROM product_source_observations AS pso
-    JOIN xologic_source_observations AS so USING(source_id)
-    WHERE pso.product_ref=r.product_ref
-  ) AS terminal_observation_count,
-  (
-    SELECT count(DISTINCT COALESCE(so.source_namespace,''))
-    FROM product_source_observations AS pso
-    JOIN xologic_source_observations AS so USING(source_id)
-    WHERE pso.product_ref=r.product_ref
-  ) AS terminal_provider_count,
-  COALESCE((
-    SELECT json_group_array(json_object(
-      'source_namespace',q.source_namespace,
-      'object_kind',q.object_kind,
-      'parser_identity',q.parser_identity,
-      'config_identity',q.config_identity,
-      'code_identity',q.code_identity,
-      'observation_count',q.observation_count
-    ))
-    FROM (
-      SELECT
-        so.source_namespace,so.object_kind,so.parser_identity,
-        so.config_identity,so.code_identity,count(*) AS observation_count
-      FROM product_source_observations AS pso
-      JOIN xologic_source_observations AS so USING(source_id)
-      WHERE pso.product_ref=r.product_ref
-      GROUP BY so.source_namespace,so.object_kind,so.parser_identity,
-               so.config_identity,so.code_identity
-      ORDER BY so.source_namespace,so.object_kind,so.parser_identity,
-               so.config_identity,so.code_identity
-    ) AS q
-  ),'[]') AS terminal_providers,
-  (
-    SELECT count(DISTINCT q.source_id)
-    FROM (
-      SELECT l.source_id
-      FROM product_links AS l
-      WHERE l.product_ref=r.product_ref AND l.scope='discover_only'
-      UNION ALL
-      SELECT x.source_id
-      FROM product_resources AS x
-      WHERE x.product_ref=r.product_ref AND x.scope='discover_only'
-    ) AS q
-  ) AS discovery_observation_count,
-  (
-    SELECT count(*)
-    FROM json_each(
-      CASE WHEN json_valid(r.product_json) THEN r.product_json ELSE '{}' END,
-      '$.variants'
-    ) AS v
-    WHERE trim(COALESCE(CAST(json_extract(v.value,'$.price') AS TEXT),''))<>''
-  ) AS listing_price_observation_count,
-  (
-    SELECT count(DISTINCT trim(CAST(json_extract(v.value,'$.price') AS TEXT)))
-    FROM json_each(
-      CASE WHEN json_valid(r.product_json) THEN r.product_json ELSE '{}' END,
-      '$.variants'
-    ) AS v
-    WHERE trim(COALESCE(CAST(json_extract(v.value,'$.price') AS TEXT),''))<>''
-  ) AS listing_price_distinct_count,
+  COALESCE(aps.details_status,'absent') AS details_status,
+  COALESCE(aps.terminal_observation_count,0) AS terminal_observation_count,
+  COALESCE(aps.terminal_provider_count,0) AS terminal_provider_count,
+  COALESCE(aps.terminal_providers,'[]') AS terminal_providers,
+  COALESCE(aps.discovery_observation_count,0) AS discovery_observation_count,
+  COALESCE(aps.listing_price_observation_count,0) AS listing_price_observation_count,
+  COALESCE(aps.listing_price_distinct_count,0) AS listing_price_distinct_count,
   json_object(
     'native_products','present',
     'source_recovery','present',
@@ -284,7 +214,39 @@ SELECT
     'evidence_receipt',(SELECT value FROM _metadata WHERE key='evidence_receipt'),
     'evidence_schema_version',(SELECT value FROM _metadata WHERE key='evidence_schema_version'),
     'authority',(SELECT value FROM _metadata WHERE key='authority'),
-    'serving_projection_is_source_claim',json('false')
+    'terminal_coverage_complete',
+      CASE
+        WHEN COALESCE(
+          (SELECT value FROM _metadata WHERE key='terminal_coverage_complete'),
+          aps.terminal_coverage_complete,
+          'false'
+        )='true' THEN json('true')
+        ELSE json('false')
+      END,
+    'live_pdp_details_complete',
+      CASE
+        WHEN COALESCE(
+          (SELECT value FROM _metadata WHERE key='live_pdp_details_complete'),
+          aps.live_pdp_details_complete,
+          'false'
+        )='true' THEN json('true')
+        ELSE json('false')
+      END,
+    'pdp_details_complete',
+      CASE
+        WHEN COALESCE(
+          (SELECT value FROM _metadata WHERE key='pdp_details_complete'),
+          aps.pdp_details_complete,
+          'false'
+        )='true' THEN json('true')
+        ELSE json('false')
+      END,
+    'serving_projection_is_source_claim',json('false'),
+    'dossier_scope',COALESCE(
+      (SELECT value FROM _metadata WHERE key='dossier_scope'),
+      aps.dossier_scope,
+      'derived-agent-dossier'
+    )
   ) AS source_completeness_json,
   COALESCE((
     SELECT json_group_array(json_object(
@@ -294,10 +256,10 @@ SELECT
       'tag',q.tag,'section_heading',q.section_heading,'scope',q.scope
     ))
     FROM (
-      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
-             locator,tag,section_heading,scope
-      FROM images
-      WHERE product_ref=r.product_ref
+      SELECT link_id AS relation_id,source_id,surface_ordinal,visible_text,
+             url,raw_href,locator,tag,section_heading,scope
+      FROM product_links
+      WHERE product_ref=r.product_ref AND kind='image_for'
       ORDER BY COALESCE(surface_ordinal,0),url,relation_id
     ) AS q
   ),'[]') AS images_json,
@@ -309,10 +271,10 @@ SELECT
       'tag',q.tag,'section_heading',q.section_heading,'scope',q.scope
     ))
     FROM (
-      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
-             locator,tag,section_heading,scope
-      FROM downloads
-      WHERE product_ref=r.product_ref
+      SELECT link_id AS relation_id,source_id,surface_ordinal,visible_text,
+             url,raw_href,locator,tag,section_heading,scope
+      FROM product_links
+      WHERE product_ref=r.product_ref AND kind='document_for'
       ORDER BY COALESCE(surface_ordinal,0),url,relation_id
     ) AS q
   ),'[]') AS downloads_json,
@@ -326,11 +288,12 @@ SELECT
       'target_id',q.target_id,'target_source_id',q.target_source_id
     ))
     FROM (
-      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
-             locator,tag,section_heading,fragment_meaningful,target_id,
-             target_source_id
-      FROM options
+      SELECT link_id AS relation_id,source_id,surface_ordinal,visible_text,
+             url,raw_href,locator,tag,section_heading,fragment_meaningful,
+             target_id,target_source_id
+      FROM product_links
       WHERE product_ref=r.product_ref
+        AND kind='option_for'
       ORDER BY COALESCE(surface_ordinal,0),url,relation_id
     ) AS q
   ),'[]') AS options_json,
@@ -344,11 +307,13 @@ SELECT
       'target_id',q.target_id,'target_source_id',q.target_source_id
     ))
     FROM (
-      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
-             locator,tag,section_heading,fragment_meaningful,target_id,
-             target_source_id
-      FROM additional_options_that_would_change_other_selections
+      SELECT link_id AS relation_id,source_id,surface_ordinal,visible_text,
+             url,raw_href,locator,tag,section_heading,fragment_meaningful,
+             target_id,target_source_id
+      FROM product_links
       WHERE product_ref=r.product_ref
+        AND kind='option_for'
+        AND section_heading='Additional options that would change other selections'
       ORDER BY COALESCE(surface_ordinal,0),url,relation_id
     ) AS q
   ),'[]') AS additional_options_that_would_change_other_selections_json,
@@ -361,10 +326,12 @@ SELECT
       'target_source_id',q.target_source_id
     ))
     FROM (
-      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
-             locator,tag,target_id,target_source_id
-      FROM collection_products
+      SELECT link_id AS relation_id,source_id,surface_ordinal,visible_text,
+             url,raw_href,locator,tag,target_id,target_source_id
+      FROM product_links
       WHERE product_ref=r.product_ref
+        AND kind='product_link'
+        AND section_heading='More In This Collection'
       ORDER BY COALESCE(surface_ordinal,0),url,relation_id
     ) AS q
   ),'[]') AS collection_products_json,
@@ -377,10 +344,12 @@ SELECT
       'target_source_id',q.target_source_id
     ))
     FROM (
-      SELECT relation_id,source_id,surface_ordinal,visible_text,url,raw_href,
-             locator,tag,target_id,target_source_id
-      FROM related_products
+      SELECT link_id AS relation_id,source_id,surface_ordinal,visible_text,
+             url,raw_href,locator,tag,target_id,target_source_id
+      FROM product_links
       WHERE product_ref=r.product_ref
+        AND kind='product_link'
+        AND section_heading='Related Products'
       ORDER BY COALESCE(surface_ordinal,0),url,relation_id
     ) AS q
   ),'[]') AS related_products_json,
@@ -449,7 +418,8 @@ SELECT
       ORDER BY x.kind,x.url
     ) AS q
   ),'[]') AS documents_json
-FROM resolved_products AS r;
+FROM resolved_products AS r
+LEFT JOIN agent_product_status AS aps USING(product_ref);
 
 -- Exact serialized size for deterministic complete-product batching. The JSON
 -- is a derived transport measurement, not another product authority.

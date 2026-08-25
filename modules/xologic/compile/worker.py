@@ -190,6 +190,119 @@ SELECT link_id AS relation_id,product_ref,source_id,surface_ordinal,
        visible_text,url,raw_href,locator,tag,target_id,target_source_id
 FROM product_links
 WHERE kind='product_link' AND section_heading='Related Products';
+
+CREATE VIEW agent_product_status AS
+SELECT
+  p.product_ref,
+  CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM product_source_observations AS pso
+      WHERE pso.product_ref=p.product_ref
+    ) THEN 'absent'
+    WHEN EXISTS (
+      SELECT 1
+      FROM product_source_observations AS pso
+      JOIN xologic_source_observations AS so USING(source_id)
+      WHERE pso.product_ref=p.product_ref AND so.status BETWEEN 200 AND 299
+    ) THEN 'live'
+    ELSE 'stale'
+  END AS details_status,
+  (
+    SELECT count(*)
+    FROM product_source_observations AS pso
+    JOIN xologic_source_observations AS so USING(source_id)
+    WHERE pso.product_ref=p.product_ref
+  ) AS terminal_observation_count,
+  (
+    SELECT count(DISTINCT COALESCE(so.source_namespace,''))
+    FROM product_source_observations AS pso
+    JOIN xologic_source_observations AS so USING(source_id)
+    WHERE pso.product_ref=p.product_ref
+  ) AS terminal_provider_count,
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'source_namespace',q.source_namespace,
+      'object_kind',q.object_kind,
+      'parser_identity',q.parser_identity,
+      'config_identity',q.config_identity,
+      'code_identity',q.code_identity,
+      'observation_count',q.observation_count
+    ))
+    FROM (
+      SELECT
+        so.source_namespace,so.object_kind,so.parser_identity,
+        so.config_identity,so.code_identity,count(*) AS observation_count
+      FROM product_source_observations AS pso
+      JOIN xologic_source_observations AS so USING(source_id)
+      WHERE pso.product_ref=p.product_ref
+      GROUP BY so.source_namespace,so.object_kind,so.parser_identity,
+               so.config_identity,so.code_identity
+      ORDER BY so.source_namespace,so.object_kind,so.parser_identity,
+               so.config_identity,so.code_identity
+    ) AS q
+  ),'[]') AS terminal_providers,
+  (
+    SELECT count(DISTINCT q.source_id)
+    FROM (
+      SELECT l.source_id
+      FROM product_links AS l
+      WHERE l.product_ref=p.product_ref AND l.scope='discover_only'
+      UNION ALL
+      SELECT x.source_id
+      FROM product_resources AS x
+      WHERE x.product_ref=p.product_ref AND x.scope='discover_only'
+    ) AS q
+  ) AS discovery_observation_count,
+  (
+    SELECT count(*)
+    FROM json_each(
+      CASE WHEN json_valid(p.product_json) THEN p.product_json ELSE '{}' END,
+      '$.variants'
+    ) AS v
+    WHERE trim(COALESCE(CAST(json_extract(v.value,'$.price') AS TEXT),''))<>''
+  ) AS listing_price_observation_count,
+  (
+    SELECT count(DISTINCT trim(CAST(json_extract(v.value,'$.price') AS TEXT)))
+    FROM json_each(
+      CASE WHEN json_valid(p.product_json) THEN p.product_json ELSE '{}' END,
+      '$.variants'
+    ) AS v
+    WHERE trim(COALESCE(CAST(json_extract(v.value,'$.price') AS TEXT),''))<>''
+  ) AS listing_price_distinct_count,
+  CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM products AS px
+      WHERE NOT EXISTS (
+        SELECT 1 FROM product_source_observations AS pso
+        WHERE pso.product_ref=px.product_ref
+      )
+    ) THEN 'true'
+    ELSE 'false'
+  END AS terminal_coverage_complete,
+  CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM products AS px
+      WHERE NOT EXISTS (
+        SELECT 1 FROM product_source_observations AS pso
+        WHERE pso.product_ref=px.product_ref
+      )
+    ) THEN 'true'
+    ELSE 'false'
+  END AS live_pdp_details_complete,
+  CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM products AS px
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM product_source_observations AS pso
+        JOIN xologic_source_observations AS so USING(source_id)
+        WHERE pso.product_ref=px.product_ref AND so.status BETWEEN 200 AND 299
+      )
+    ) THEN 'true'
+    ELSE 'false'
+  END AS pdp_details_complete,
+  'module-native-derived-agent-dossier' AS dossier_scope
+FROM products AS p;
 """
 
 
@@ -750,6 +863,7 @@ def verify_cell(path: Path) -> dict[str,Any]:
             "other_details", "images", "downloads", "options",
             "additional_options_that_would_change_other_selections",
             "collection_products", "related_products",
+            "agent_product_status",
         }
         if orient is None or any(name not in orient[0] for name in required_orient_relations):
             raise CaptureError("@orient does not declare the enriched XOLogic surface")

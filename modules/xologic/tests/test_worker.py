@@ -300,6 +300,7 @@ def test_native_cell_preserves_source_observations_and_relations(tmp_path, monke
             ("view", "downloads"), ("view", "options"),
             ("view", "additional_options_that_would_change_other_selections"),
             ("view", "collection_products"), ("view", "related_products"),
+            ("view", "agent_product_status"),
         }
         assert required <= objects
         assert not {"xologic_content_objects", "_raw_chunks", "_raw_sources"} & {
@@ -409,6 +410,7 @@ def test_native_cell_preserves_source_observations_and_relations(tmp_path, monke
     assert any(row.get("name") == "resolved_spec_values" for row in query_surface)
     assert any(row.get("name") == "products_fts" for row in query_surface)
     assert any(row.get("name") == "product_dossiers" for row in query_surface)
+    assert any(row.get("name") == "agent_product_status" for row in query_surface)
     assert any(row.get("name") == "product_identifiers" for row in query_surface)
     assert "Fixture" not in json.dumps(result)
 
@@ -482,34 +484,18 @@ def test_v2_dossier_v3_payload_preserves_relation_parity_and_boundaries(tmp_path
     target = tmp_path / "catalogue.db"
     build_cell(capture, target, store_name="Dossier V3")
 
-    relation_columns = {
-        "images": (
-            "relation_id", "source_id", "surface_ordinal", "visible_text",
-            "url", "raw_href", "locator", "tag", "section_heading", "scope",
-        ),
-        "downloads": (
-            "relation_id", "source_id", "surface_ordinal", "visible_text",
-            "url", "raw_href", "locator", "tag", "section_heading", "scope",
-        ),
-        "options": (
-            "relation_id", "source_id", "surface_ordinal", "visible_text",
-            "url", "raw_href", "locator", "tag", "section_heading",
-            "fragment_meaningful", "target_id", "target_source_id",
-        ),
+    link_relations = {
+        "downloads": "kind='document_for'",
+        "options": "kind='option_for'",
         "additional_options_that_would_change_other_selections": (
-            "relation_id", "source_id", "surface_ordinal", "visible_text",
-            "url", "raw_href", "locator", "tag", "section_heading",
-            "fragment_meaningful", "target_id", "target_source_id",
+            "kind='option_for' AND section_heading="
+            "'Additional options that would change other selections'"
         ),
         "collection_products": (
-            "relation_id", "source_id", "surface_ordinal", "visible_text",
-            "url", "raw_href", "locator", "tag", "target_id",
-            "target_source_id",
+            "kind='product_link' AND section_heading='More In This Collection'"
         ),
         "related_products": (
-            "relation_id", "source_id", "surface_ordinal", "visible_text",
-            "url", "raw_href", "locator", "tag", "target_id",
-            "target_source_id",
+            "kind='product_link' AND section_heading='Related Products'"
         ),
     }
 
@@ -537,13 +523,58 @@ def test_v2_dossier_v3_payload_preserves_relation_parity_and_boundaries(tmp_path
         assert completeness["expected_product_resources"] == 2
         assert completeness["source_properties"] == "present"
         assert completeness["serving_projection_is_source_claim"] is False
+        assert completeness["terminal_coverage_complete"] is True
+        assert completeness["live_pdp_details_complete"] is True
+        assert completeness["pdp_details_complete"] is True
+        assert completeness["dossier_scope"] == "module-native-derived-agent-dossier"
 
-        for relation, columns in relation_columns.items():
+        images_native = [
+            {column: value for column, value in zip(
+                (
+                    "relation_id", "source_id", "surface_ordinal", "visible_text",
+                    "url", "raw_href", "locator", "tag", "section_heading", "scope",
+                ),
+                values,
+            )}
+            for values in db.execute(
+                "SELECT link_id,source_id,surface_ordinal,visible_text,url,raw_href,"
+                "locator,tag,section_heading,scope FROM product_links "
+                "WHERE kind='image_for' "
+                "ORDER BY COALESCE(surface_ordinal,0),url,link_id"
+            )
+        ]
+        assert json.loads(row["images_json"]) == images_native
+
+        for relation, predicate in link_relations.items():
+            is_product_link = relation in {"collection_products", "related_products"}
             native = [
-                {column: value for column, value in zip(columns, values)}
+                {column: value for column, value in zip(
+                    (
+                        "relation_id", "source_id", "surface_ordinal", "visible_text",
+                        "url", "raw_href", "locator", "tag", "target_id",
+                        "target_source_id",
+                    ) if is_product_link else (
+                        "relation_id", "source_id", "surface_ordinal", "visible_text",
+                        "url", "raw_href", "locator", "tag", "section_heading",
+                        "fragment_meaningful", "target_id", "target_source_id",
+                    ) if relation.endswith("selections") or relation == "options" else (
+                        "relation_id", "source_id", "surface_ordinal", "visible_text",
+                        "url", "raw_href", "locator", "tag", "section_heading", "scope",
+                    ),
+                    values,
+                )}
                 for values in db.execute(
-                    f"SELECT {','.join(columns)} FROM {relation} "
-                    "ORDER BY COALESCE(surface_ordinal,0),url,relation_id"
+                    "SELECT link_id,source_id,surface_ordinal,visible_text,url,raw_href,"
+                    "locator,tag,"
+                    + (
+                        "target_id,target_source_id "
+                        if is_product_link else
+                        "section_heading,fragment_meaningful,target_id,target_source_id "
+                        if relation.endswith("selections") or relation == "options"
+                        else "section_heading,scope "
+                    )
+                    + f"FROM product_links WHERE {predicate} "
+                    "ORDER BY COALESCE(surface_ordinal,0),url,link_id"
                 )
             ]
             assert json.loads(row[f"{relation}_json"]) == native
@@ -551,6 +582,9 @@ def test_v2_dossier_v3_payload_preserves_relation_parity_and_boundaries(tmp_path
         assert json.loads(row["images_json"])[0]["relation_id"] == "rel_image"
         assert json.loads(row["downloads_json"])[0]["relation_id"] == "rel_download"
         assert json.loads(row["options_json"])[0]["relation_id"] == "rel_option"
+        assert json.loads(
+            row["additional_options_that_would_change_other_selections_json"]
+        )[0]["relation_id"] == "rel_option"
         payload = json.loads(db.execute(
             "SELECT dossier_json FROM product_dossier_payloads"
         ).fetchone()[0])
@@ -589,6 +623,8 @@ def test_dossier_v3_marks_terminal_details_stale_without_live_observation(tmp_pa
             "SELECT dossier_json FROM product_dossier_payloads"
         ).fetchone()[0])
         assert decoded["details_status"] == "stale"
+        assert decoded["source_completeness"]["terminal_coverage_complete"] is True
+        assert decoded["source_completeness"]["pdp_details_complete"] is False
 
 
 def test_dossier_v3_is_honest_when_source_properties_are_empty(tmp_path):
@@ -610,7 +646,105 @@ def test_dossier_v3_is_honest_when_source_properties_are_empty(tmp_path):
         assert completeness["source_properties"] == "absent_or_empty"
         assert completeness["expected_source_properties"] == 0
         assert completeness["serving_projection_is_source_claim"] is False
+        assert completeness["dossier_scope"] == "module-native-derived-agent-dossier"
         assert db.execute("SELECT count(*) FROM product_links").fetchone()[0] == 5
+
+
+def test_dossier_v3_does_not_depend_on_fixture_relation_view_columns(tmp_path):
+    capture = _fixture_v2(tmp_path / "capture")
+    target = tmp_path / "catalogue.db"
+    build_cell(capture, target)
+    sql = (Path(__file__).resolve().parents[1] / "stock" / "sql" /
+           "product_search.sql").read_text()
+
+    with sqlite3.connect(target) as db:
+        db.executescript("""
+            DROP VIEW images;
+            DROP VIEW downloads;
+            DROP VIEW options;
+            DROP VIEW additional_options_that_would_change_other_selections;
+            CREATE TABLE images (
+              product_ref TEXT NOT NULL,
+              terminal_observation_id TEXT NOT NULL,
+              collection_order INTEGER NOT NULL,
+              source_order INTEGER,
+              locator TEXT,
+              source_line INTEGER,
+              src TEXT,
+              resolved_src TEXT,
+              attributes TEXT NOT NULL,
+              parent_attributes TEXT NOT NULL,
+              raw_start_tag TEXT,
+              raw_html TEXT,
+              raw_json TEXT NOT NULL,
+              PRIMARY KEY (product_ref, terminal_observation_id, collection_order)
+            );
+            CREATE TABLE downloads (
+              product_ref TEXT NOT NULL,
+              terminal_observation_id TEXT NOT NULL,
+              collection_order INTEGER NOT NULL,
+              source_order INTEGER,
+              locator TEXT,
+              source_line INTEGER,
+              label TEXT,
+              href TEXT,
+              resolved_href TEXT,
+              visible_text TEXT,
+              raw_href TEXT,
+              target_url TEXT,
+              surface_ordinal INTEGER,
+              section_heading TEXT,
+              attributes TEXT NOT NULL,
+              raw_start_tag TEXT,
+              raw_json TEXT NOT NULL,
+              PRIMARY KEY (product_ref, terminal_observation_id, collection_order)
+            );
+            CREATE TABLE options (
+              product_ref TEXT NOT NULL,
+              terminal_observation_id TEXT NOT NULL,
+              collection_order INTEGER NOT NULL,
+              source_order INTEGER,
+              locator TEXT,
+              source_line INTEGER,
+              option_label TEXT,
+              option_title TEXT,
+              value_text TEXT,
+              visible_value_text TEXT,
+              raw_value_literal TEXT,
+              selected_marker TEXT,
+              raw_selected_marker_literal TEXT,
+              selected INTEGER,
+              comparison_evidence TEXT,
+              comparison_expression TEXT,
+              comparison_left TEXT,
+              comparison_operator TEXT,
+              comparison_right TEXT,
+              comparison_result INTEGER,
+              href TEXT,
+              resolved_href TEXT,
+              href_occurrences TEXT NOT NULL,
+              script_order INTEGER,
+              block_order INTEGER,
+              box_attributes TEXT NOT NULL,
+              script_attributes TEXT NOT NULL,
+              raw_script TEXT,
+              raw_block TEXT,
+              raw_json TEXT NOT NULL,
+              PRIMARY KEY (product_ref, terminal_observation_id, collection_order)
+            );
+            CREATE TABLE additional_options_that_would_change_other_selections
+              AS SELECT * FROM options WHERE 0;
+        """)
+        db.executescript(sql)
+        row = db.execute(
+            "SELECT images_json,downloads_json,options_json,"
+            "additional_options_that_would_change_other_selections_json "
+            "FROM product_dossiers"
+        ).fetchone()
+        assert json.loads(row[0])[0]["relation_id"] == "rel_image"
+        assert json.loads(row[1])[0]["relation_id"] == "rel_download"
+        assert json.loads(row[2])[0]["relation_id"] == "rel_option"
+        assert json.loads(row[3])[0]["relation_id"] == "rel_option"
 
 
 def test_v2_duplicate_evidence_identity_fails_closed(tmp_path):
