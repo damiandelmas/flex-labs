@@ -283,8 +283,10 @@ SELECT
     WHEN NOT EXISTS (
       SELECT 1 FROM products AS px
       WHERE NOT EXISTS (
-        SELECT 1 FROM product_source_observations AS pso
-        WHERE pso.product_ref=px.product_ref
+        SELECT 1
+        FROM product_source_observations AS pso
+        JOIN xologic_source_observations AS so USING(source_id)
+        WHERE pso.product_ref=px.product_ref AND so.status BETWEEN 200 AND 299
       )
     ) THEN 'true'
     ELSE 'false'

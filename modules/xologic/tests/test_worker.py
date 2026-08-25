@@ -624,6 +624,7 @@ def test_dossier_v3_marks_terminal_details_stale_without_live_observation(tmp_pa
         ).fetchone()[0])
         assert decoded["details_status"] == "stale"
         assert decoded["source_completeness"]["terminal_coverage_complete"] is True
+        assert decoded["source_completeness"]["live_pdp_details_complete"] is False
         assert decoded["source_completeness"]["pdp_details_complete"] is False
 
 
