@@ -23,7 +23,7 @@ run_section() {
   local heading="$1"
   local sql_file="$2"
   printf '\n## %s\n\n' "$heading"
-  "$QUERY" "$sql_file"
+  "$QUERY" "$sql_file" "$DAYS"
 }
 
 # Invalidate any stale cache from a previous run BEFORE seeding, so no one can
@@ -35,7 +35,7 @@ printf '## Seed (last %s days)\n\n' "$DAYS"
 
 run_section "Communities (all-time, seeded)"          "$QUERY_DIR/seed-communities.sql"
 run_section "Hubs (top 3 per community)"              "$QUERY_DIR/seed-hubs.sql"
-run_section "Hub Content (top hub opener + fingerprint per community)" "$QUERY_DIR/seed-hub-openers.sql"
+run_section "Hub Content (all-time + recent hub openers/fingerprints per community)" "$QUERY_DIR/seed-hub-openers.sql"
 run_section "Bridges (cross-community)"               "$QUERY_DIR/seed-bridges.sql"
 run_section "Projects"                                "$QUERY_DIR/seed-projects.sql"
 run_section "Temporal Pulse"                          "$QUERY_DIR/seed-temporal.sql"

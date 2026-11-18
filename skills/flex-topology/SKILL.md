@@ -21,9 +21,13 @@ You are mapping the **shape of someone's work** — not listing data, but reveal
 **You have three layers of signal — use all of them:**
 1. **Structural** — session counts, centrality, hub/bridge flags, temporal pulse
 2. **Fingerprints** — terse operation summaries on hubs and bridges (the `fingerprint` field). These tell you WHAT was done.
-3. **Hub openers** — the first user prompt from each community's top hub. These tell you WHY it was done.
+3. **Hub openers** — the first user prompt from each community's hubs. These tell you WHY it was done.
 
 The fingerprints and openers are the most valuable. They carry intent and substance. Use them to say what actually happened in each workstream, not just that it was "ramping" or "cooling."
+
+**Tier rule:** Hub Content and Bridge entries carry a `tier` field — `recent` (inside the seed window) vs `all-time` (the community's historical anchor). Describe each workstream's CURRENT activity from its `recent` entries; use `all-time` entries only as lineage context ("this grew out of..."). Never present an `all-time` hub's content as what happened this period — check its `started` date.
+
+**Naming rule:** Name each workstream from its `recent` hub openers and fingerprints — what the sessions actually did this period. Ignore the community label string (e.g. "anima · onboard · epxlore") when naming; it reflects historical clustering, not current work. If the recent content is chatbot work, call it "Chatbot" — even if the community label says "anima".
 
 **CRITICAL tone rule:** Write like a coworker giving a casual standup, NOT like a technical changelog. No variable names, no function signatures, no hex colors, no CTE counts. The reader wants to scan this in 20 seconds.
 

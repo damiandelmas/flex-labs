@@ -173,6 +173,10 @@ def test_raw_capture_staging_and_atomic_cell_preserve_store_population(tmp_path,
         ).fetchone()[0] == 0
         raw = db.execute("SELECT raw_json FROM woo_product_raw WHERE native_id='1'").fetchone()[0]
         assert json.loads(raw)["extensions"]["fixture_test"]["aisle"] == 1
+        resolved_raw = db.execute(
+            "SELECT source_product_json FROM resolved_products WHERE product_ref='1'"
+        ).fetchone()[0]
+        assert resolved_raw == raw
         orient = db.execute("SELECT sql FROM _presets WHERE name='orient'").fetchone()[0]
         assert "catalogue_json_values" in orient
         meta_keys = {row[0] for row in db.execute("SELECT key FROM _meta").fetchall()}

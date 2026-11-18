@@ -3,7 +3,6 @@
   'community_id', community_id,
   'session_id', session_id,
   'title', SUBSTR(title, 1, 120),
-  'fingerprint', COALESCE(fingerprint_index, ''),
   'centrality', ROUND(centrality, 6),
   'msgs', message_count,
   'started', started_at

@@ -123,7 +123,7 @@ WITH preferred AS (
 )
 SELECT p.product_id AS product_ref,p.product_id,e.name_text AS title,e.name_text AS name,p.slug,p.product_url,p.permalink,p.sku,p.product_type,
        p.stock_status,p.is_in_stock,p.is_purchasable,p.on_sale,raw.has_options,raw.is_on_backorder,
-       raw.parent_id,p.currency_code,p.currency_minor_unit,
+       raw.parent_id,raw.raw_json AS source_product_json,p.currency_code,p.currency_minor_unit,
        p.price_visibility,p.price_raw,CASE p.currency_minor_unit WHEN 0 THEN CAST(p.price_raw AS REAL)
          WHEN 1 THEN CAST(p.price_raw AS REAL)/10.0 WHEN 2 THEN CAST(p.price_raw AS REAL)/100.0
          WHEN 3 THEN CAST(p.price_raw AS REAL)/1000.0 END AS price,

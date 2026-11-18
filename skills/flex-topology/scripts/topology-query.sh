@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # topology-query.sh — Phase 2: run a single topology query with cached community IDs
-# Usage: topology-query.sh <query-file.sql>
+# Usage: topology-query.sh <query-file.sql> [DAYS]
 # Reads community IDs from /tmp/topology-community-ids.txt
 
 set -euo pipefail
 
 SQL_FILE="$1"
+DAYS="${2:-14}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FLEX_QUERY="$SCRIPT_DIR/flex-query.sh"
 CACHE="/tmp/topology-community-ids.txt"
@@ -25,5 +26,5 @@ fi
 COMMUNITY_IDS=$(cat "$CACHE")
 # NOTE: SQL files may start with '!' — that's the flex_search gate-bypass
 # token (needed for the large hub/bridge/opener payloads). Do NOT strip it.
-SQL=$(sed "s/{{COMMUNITY_IDS}}/$COMMUNITY_IDS/g" "$SQL_FILE")
+SQL=$(sed -e "s/{{COMMUNITY_IDS}}/$COMMUNITY_IDS/g" -e "s/{{DAYS}}/$DAYS/g" "$SQL_FILE")
 echo "$SQL" | "$FLEX_QUERY" claude_code 2>/dev/null
